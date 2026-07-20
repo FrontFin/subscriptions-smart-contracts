@@ -203,6 +203,38 @@ fn rotation_is_a_single_transaction() {
 }
 
 #[test]
+fn set_admin_hands_over_and_locks_out_the_old_admin() {
+    let mut env = setup();
+    let old_admin = env.admin.insecure_clone();
+    let new_admin = Keypair::new();
+    env.svm.airdrop(&new_admin.pubkey(), 1_000_000_000).unwrap();
+
+    // Non-admin cannot take over.
+    let ix = config_ix(
+        &env,
+        &subscription_controller::instruction::SetAdmin { new_admin: new_admin.pubkey() }.data(),
+        new_admin.pubkey(),
+        false,
+    );
+    send(&mut env, ix, &new_admin, &[&new_admin]).expect_err("non-admin cannot set_admin");
+
+    // Admin hands over (e.g. to a Squads vault).
+    let ix = config_ix(
+        &env,
+        &subscription_controller::instruction::SetAdmin { new_admin: new_admin.pubkey() }.data(),
+        old_admin.pubkey(),
+        false,
+    );
+    send(&mut env, ix, &old_admin, &[&old_admin]).expect("admin hands over");
+
+    // Old admin is locked out; new admin can update keys.
+    let ix = set_puller_keys_ix(&env, old_admin.pubkey(), vec![]);
+    send(&mut env, ix, &old_admin, &[&old_admin]).expect_err("old admin locked out");
+    let ix = set_puller_keys_ix(&env, new_admin.pubkey(), vec![new_admin.pubkey()]);
+    send(&mut env, ix, &new_admin, &[&new_admin]).expect("new admin updates keys");
+}
+
+#[test]
 fn empty_list_is_the_kill_switch() {
     let mut env = setup();
     let admin = env.admin.insecure_clone();

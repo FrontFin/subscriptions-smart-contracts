@@ -1,179 +1,165 @@
 # Deploying the Mesh Subscription Controller
 
-How to deploy, update, and undeploy — step by step first; background
-(environments, testing, design) at the end. The why is in the
+Steps first, background last. The why is in the
 [TDD](../docs/solana-pull-payment-pda-tdd.md).
 
-> **Money-moving program, mainnet-only.** The upgrade-authority wallet is the
-> root of trust — whoever holds it can replace the program. No private keys
-> ever live in this repo.
+> **Mainnet-only, money-moving.** Every signature is a popup in your browser
+> wallet (Phantom / Solflare / Backpack) via a localhost bridge — no private
+> key is ever pasted or stored, and your wallet stays the owner. Approve
+> popups within ~60s (blockhash expiry; scripts offer a retry).
 
-## How to deploy
+Prerequisites: Solana CLI (Agave) `4.0.2`, Rust `1.89`, a Wallet Standard
+browser wallet.
 
-Prerequisites: Solana CLI (Agave) `4.0.2`, Rust `1.89` (pinned in
-`rust-toolchain.toml`), and a wallet (e.g. Phantom) you can export the
-private key from.
+## Deploy (first time for an env)
 
-**Step 1 — set the env's variables.** Open `scripts/envs/<env>.env`
-(`local`, `dev`, or `prod`) and set:
+1. **Configure** `scripts/envs/<env>.env` (`local`, `dev`, or `prod`):
 
-```bash
-# the wallet that will OWN the program: signs this deploy and every future
-# upgrade/close, pays fees, receives the rent refund on undeploy.
-# You hold its private key in your wallet app.
-UPGRADE_AUTHORITY=<your wallet pubkey>
+   ```bash
+   UPGRADE_AUTHORITY=<your wallet pubkey>   # owns the program: signs upgrades/close, becomes config admin
+   PULLER_KEYS="<puller pubkey>"            # key(s) the env's backend signs pulls with (space-separated)
+   ```
 
-# pubkeys allowed to trigger `pull` — the key(s) this env's backend signs
-# pulls with (private keys in that backend's Key Vault). Space-separated.
-PULLER_KEYS="<puller pubkey>"
-```
+   Don't set `PROGRAM_ID` — the deploy writes it.
 
-Leave `PROGRAM_ID` alone — it does not exist yet; the deploy writes it.
+2. **Fund**: ~0.75 SOL in the wallet (~0.65 becomes the program's rent
+   deposit, refunded on undeploy; leftovers return automatically).
 
-**Step 2 — fund the wallet.** Send **~1 SOL** to the `UPGRADE_AUTHORITY`
-address (~0.63 SOL is a rent deposit refunded on undeploy; the rest covers
-fees, leftover stays in the wallet).
+3. **Run**:
 
-**Step 3 — run the deploy.**
+   ```bash
+   cd solana
+   scripts/deploy.sh <env>
+   ```
 
-```bash
-cd solana
-scripts/deploy.sh <env>
-```
+   Review the printed plan, type `deploy`, then approve **two popups**:
+   fund the temporary payer, and initialize the on-chain config.
 
-The script, in order:
+4. **Copy the printed outputs into the backend** (both Azure apps, same
+   value):
 
-1. Refuses to run if `UPGRADE_AUTHORITY` or `PULLER_KEYS` is missing; warns
-   loudly if `PULLER_KEYS` is empty (the on-chain config would be set to the
-   kill switch).
-2. Builds the program (only the program id is compiled in — puller keys
-   live in the on-chain config, next step).
-3. First deploy only: mints a fresh program keypair — its pubkey becomes the
-   env's **permanent program id**; the private key is used for this one
-   deploy and discarded (it grants nothing afterwards).
-4. **Prompts you to paste the `UPGRADE_AUTHORITY` wallet's private key**
-   (base58, e.g. Phantom → Settings → Export Private Key). Input is hidden,
-   held in a temp file outside the repo, deleted when the script exits, and
-   rejected unless it derives exactly the configured pubkey.
-5. Prints the plan (env, payer, program id, artifact hash, puller keys) —
-   **type `deploy`** to confirm, anything else aborts.
-6. Deploys, then syncs the env's `PULLER_KEYS` into the program's on-chain
-   config (creates it on the first deploy) — signed by the same wallet.
-7. Pins the contract address into the `.env` and prints:
+   - `SolanaSubscriptionConfig--SmartContractAddress` (Core API) = the
+     printed **smart contract address**.
+   - `SolanaSubscriptionPullerConfig--SmartContractAddress` (Backend
+     Functions) = the same value.
+   - `SolanaSubscriptionPullerConfig--PullerPrivateKey` (Key Vault) = the
+     puller key's secret; `PullerPublicKey` = its pubkey. Keep the puller
+     wallet funded (it pays pull fees).
 
-```
-Smart contract address (program id) : <PROGRAM_ID>
-    → set BOTH (same value): SolanaSubscriptionConfig--SmartContractAddress (Core API)
-      and SolanaSubscriptionPullerConfig--SmartContractAddress (Backend Functions)
-MeshDelegate PDA (informational)    : <PDA>
-    → derived by the backend itself; becomes the 'delegatee' recorded on
-      each subscription (DB row + on-chain delegation)
-```
+   The printed **MeshDelegate PDA** is informational — the backend derives it
+   from the contract address itself; it becomes each subscription's
+   `delegatee`. Re-print anytime: `scripts/pda.sh <env>`.
 
-The PDA is `hash("mesh_delegate", PROGRAM_ID)` — the backend re-derives it
-from the contract address at run time, so it is **not a config value**; the
-printed value is for cross-checking the backend's derivation (it's also the
-known-good test vector in `SolanaSubscriptionInstructionBuilderTests`).
-Re-print anytime with `scripts/pda.sh <env>`.
+   The deploy also saves these values into `scripts/envs/<env>.env`
+   (`PROGRAM_ID` + the PDA as a comment). **Commit that file** — everything
+   in it is public, and with no registry/DB yet the committed `.env` files
+   are the source of truth for what each environment runs.
 
-**Step 4 — wire into Mesh.** One config change spanning both Azure apps
-(they must always carry the same address — if they diverge, the API mints
-rows under one PDA and the puller derives another; watch for the
-`subscription_unpullable_active_row` signal):
+5. **Verify** with a dust-amount subscription: subscribe → auto-pull through
+   the controller → check the transfer on an explorer.
 
-- `SolanaSubscriptionConfig--SmartContractAddress` (Core API app) = the
-  contract address from step 3.
-- `SolanaSubscriptionPullerConfig--SmartContractAddress` (Backend Functions
-  app) = the same value.
-- `SolanaSubscriptionPullerConfig--PullerPrivateKey` (Key Vault secret) = the
-  private key whose pubkey is in this env's `PULLER_KEYS`; set the plain
-  `PullerPublicKey` setting to that pubkey so operators can verify without
-  the secret. The puller signs `pull` with it and pays each pull's fee —
-  keep the wallet funded with SOL and alerted on balance.
+## Update puller keys (rotation / kill switch)
 
-**Step 5 — verify.** Create a test subscription with a dust amount, let the
-puller pull it through the controller, confirm the transfer on an explorer.
-Only then enable real traffic (after the external audit).
+A single data transaction — no rebuild, no redeploy, audited code untouched.
+Program id, PDA, and existing delegations never change.
 
-## How to update
+1. **Configure** `scripts/envs/<env>.env`: set `PULLER_KEYS` to the new
+   space-separated list. Rotation: list old **and** new. Kill switch: `""`.
+   Resume: restore the keys.
 
-Key changes are DATA transactions (edit the `.env`, run `set-puller-keys.sh`)
-— the audited program code is never touched, no re-audit trigger. Only code
-changes redeploy. Program id and PDA never change either way; delegations are
-never affected:
+2. **Run** and approve **one popup**:
 
-| Change | Edit | Run |
-| --- | --- | --- |
-| Kill switch (pause all pulls) | `PULLER_KEYS=""` | `scripts/set-puller-keys.sh <env>` |
-| Resume | restore the keys | `scripts/set-puller-keys.sh <env>` |
-| Rotate puller key (zero downtime) | 1) list old+new keys 2) after applying, flip Key Vault 3) remove old key | `scripts/set-puller-keys.sh <env>` after 1 and 3 |
-| Change upgrade authority | update `UPGRADE_AUTHORITY` after running → | `solana program set-upgrade-authority <PROGRAM_ID> --new-upgrade-authority <NEW_WALLET>` |
-| Code / retarget native program | source / `constants.rs` | `scripts/deploy.sh <env>` |
+   ```bash
+   scripts/set-puller-keys.sh <env>
+   ```
 
-The config admin is the wallet that ran the first deploy (it signed
-`initialize`). Never make the program immutable (`--final`) — code fixes
-still need upgrades. If a new binary outgrows the allocation, the deploy
-script extends it automatically.
+3. For a zero-downtime rotation, finish by flipping the backend's Key Vault
+   secret to the new key, then repeat steps 1–2 with the old key removed.
 
-## How to undeploy
+## Upgrade code
+
+Same program id, same PDA — delegations and backend config are unaffected.
+
+1. **Change the source** (`programs/subscription-controller/`) and check the
+   tests pass:
+
+   ```bash
+   ./test.sh
+   ```
+
+2. **Run** and approve **two popups** (fund the temporary payer, sign the
+   upgrade; ~0.7 SOL fronted from the wallet, returned when the upgrade
+   lands):
+
+   ```bash
+   scripts/upgrade.sh <env>
+   ```
+
+Never make the program immutable (`--final`) — upgrades are how code gets
+fixed. Binary growth is handled automatically.
+
+## Undeploy
 
 ```bash
-scripts/close.sh <env>          # wallet-key prompt, then type 'close'
+scripts/close.sh <env>          # type 'close', then approve one wallet popup
 ```
 
-- Refunds the ~0.63 SOL rent deposit to the wallet (or pass a recipient
-  pubkey as 2nd argument).
-- Unpins `PROGRAM_ID` from the `.env`.
-- ⚠️ **Irreversible**: a closed program id is burned forever. The env's next
-  deploy mints a fresh id → fresh PDA → existing delegations die with the
-  old one, and the backend `SmartContractAddress` settings must be updated.
+Refunds the rent deposit and unpins `PROGRAM_ID`. ⚠️ Irreversible: a closed
+program id is burned; the next deploy mints a fresh id → fresh PDA →
+existing delegations die and the backend `SmartContractAddress` must be
+updated.
 
 ---
 
 ## Background
 
 **Environments.** `local` (the full Mesh environment on your machine), `dev`,
-and `prod` are three independent program instances on mainnet, one `.env`
-each. Own program id → own MeshDelegate PDA → own delegations: one env's
-program can never pull another env's delegations. `test` is not an
-environment — it's the LiteSVM fixture below.
+and `prod` are independent program instances on mainnet, one `.env` each:
+own program id → own MeshDelegate PDA → own delegations. `test` is the
+LiteSVM fixture for `./test.sh`, never deployable.
 
-**Design.** Three instructions: `initialize` (one-time; creator becomes
-admin), `set_puller_keys` (admin-only; rewrites the on-chain allowlist —
-rotation and kill switch as single transactions that never modify audited
-code), and `pull` (gated by the allowlist, CPIs the native program signing as
-the MeshDelegate PDA). The PDA derives from `["mesh_delegate"]` + the program
-id only, so neither upgrades nor config updates ever move it or invalidate a
-delegation. `SUBSCRIPTIONS_PROGRAM` (the native program CPI'd into) stays a
+**Design.** Three instructions plus admin handover: `initialize` (once;
+creator becomes admin), `set_puller_keys` (admin-only allowlist update —
+rotation/kill switch without touching audited code), `set_admin`, and `pull`
+(gated by the allowlist, CPIs the native program signing as the MeshDelegate
+PDA). The PDA is `hash("mesh_delegate", program id)` — upgrades and config
+updates never move it. `SUBSCRIPTIONS_PROGRAM` (the native program) is a
 compile-time constant, identical on all envs.
+
+**How signing works.** Scripts build transactions (`tools/admin-cli`), a
+localhost page (`scripts/sign_in_browser.py`) hands them to your wallet, you
+approve. Deploy/upgrade working capital is fronted from the wallet into a
+temporary payer (popup) and swept back on exit — the wallet is the only
+funded wallet. Alternatives: `FEE_PAYER=<path>` (standing hot payer, one
+fewer popup), `set-puller-keys.sh --paste` (legacy hidden key prompt), and a
+Squads multisig path for later (`scripts/migrate-to-squads.sh`,
+`scripts/stage-upgrade.sh`, `set-puller-keys.sh --print`) — start 1-of-1,
+add members/threshold when prod needs it.
 
 **Testing.**
 
 ```bash
-./test.sh                       # 11 LiteSVM tests must pass
+./test.sh                       # 12 LiteSVM tests must pass
 ```
 
-The committed source carries the `test` program id (`scripts/build.sh <env>`
-injects a real env's id into a build, then restores the source). The suite
-creates the on-chain Config itself with keypairs derived from public seeds
-(`[1u8;32]` / `[2u8;32]`) so it can sign — anyone can reproduce them, which
-is why `test` is never deployable. Covered: config lifecycle (initialize-once,
-admin gating, rotation, kill switch + resume) and an end-to-end subscribe +
-pull against the real native Subscriptions binary dumped from mainnet
-(`tests/fixtures/subscriptions_program.so`).
+The suite creates the on-chain Config itself with keypairs derived from
+public seeds, and includes an end-to-end subscribe + pull against the real
+native Subscriptions binary dumped from mainnet
+(`tests/fixtures/subscriptions_program.so`). Refresh it with
+`solana program dump De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44 programs/subscription-controller/tests/fixtures/subscriptions_program.so -u mainnet-beta`.
 
 **Releases.** Record the git commit per deploy;
 [`solana-verify`](https://github.com/Ellipsis-Labs/solana-verifiable-build)
-lets anyone match on-chain bytes to source. Optional IDL for explorers /
-codegen: `NO_DNA=1 anchor build`, then
+matches on-chain bytes to source. Optional IDL: `NO_DNA=1 anchor build`, then
 `anchor idl init --provider.cluster mainnet --filepath target/idl/subscription_controller.json <PROGRAM_ID>`.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 | --- | --- |
-| `Unauthorized` on **every** pull | Kill-switch build (empty `PULLER_KEYS`) is live. |
-| `Unauthorized` on **some** pulls | Signing key not in the deployed `PULLER_KEYS` — mid-rotation or Key Vault / build drift. |
+| `Unauthorized` on **every** pull | Kill switch engaged (empty on-chain key list). |
+| `Unauthorized` on **some** pulls | Signing key not in the on-chain list — mid-rotation or Key Vault drift. |
+| `AccountNotInitialized` on pull | Config never initialized — run `scripts/set-puller-keys.sh <env>`. |
 | `WrongTargetProgram` | Passed `subscriptions_program` ≠ the `SUBSCRIPTIONS_PROGRAM` constant. |
-| Pulls fail after an upgrade | Wrong env's build deployed — verify with `solana-verify`. |
+| Wallet popup fails with a blockhash error | Took longer than ~60s — retry when the script offers. |
 | Build errors | Toolchain drift — re-pin (Agave `4.0.2`, Rust `1.89`). |

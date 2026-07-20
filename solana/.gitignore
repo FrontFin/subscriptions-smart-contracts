@@ -5,3 +5,4 @@ target
 test-ledger
 .surfpool
 scripts/envs/*-program-keypair.json
+__pycache__/

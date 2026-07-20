@@ -1,27 +1,135 @@
-//! Sync the controller's on-chain puller-key config: initializes the Config
-//! account on first use, updates it afterwards. Data-only — never builds or
-//! deploys code. Driven by scripts/set-puller-keys.sh (and deploy.sh).
+//! Admin operations on the controller's on-chain Config — data transactions
+//! only, never builds or deploys code. Driven by the scripts in scripts/.
 //!
-//! Usage: admin-cli <program-id> <admin-keypair-path> <rpc-url> [puller-key ...]
-//!        (zero puller keys = the kill switch: no key may pull)
+//! Usage:
+//!   admin-cli <program-id> <signer> <rpc-url> keys    [puller-key ...]
+//!   admin-cli <program-id> <signer> <rpc-url> admin   <new-admin>
+//!   admin-cli <program-id> <signer> <rpc-url> upgrade <buffer-address>
+//!   admin-cli <program-id> <signer> <rpc-url> show
+//!   admin-cli <program-id> <signer> <rpc-url> transfer <to> <lamports>
+//!   admin-cli <program-id> <signer> <rpc-url> close    <recipient>
+//!
+//! <signer> selects the mode:
+//!   a keypair file path — sign with it and send directly;
+//!   `tx:<PUBKEY>`       — build the transaction unsigned with <PUBKEY> as
+//!                         fee payer + authority and emit
+//!                         `UNSIGNED_TX_B64:<b64>` for the localhost browser
+//!                         bridge (scripts/sign_in_browser.py);
+//!   `print`             — for a Squads-held admin: read the current admin
+//!                         from the on-chain config and print the instruction
+//!                         for the Squads transaction builder.
+//!
+//! `keys` initializes the Config on first use, updates it afterwards; zero
+//! puller keys = the kill switch. `upgrade` builds the BPF-loader upgrade
+//! from a staged buffer (spill = the authority). `show` just prints the
+//! on-chain config.
 
-use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
 use anchor_lang::prelude::Pubkey;
 use anchor_lang::solana_program::instruction::Instruction;
+use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
 use solana_keypair::read_keypair_file;
 use solana_rpc_client::rpc_client::RpcClient;
+use anchor_lang::solana_program::instruction::AccountMeta;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 use std::str::FromStr;
 
+const LOADER: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
+const SYSVAR_RENT: &str = "SysvarRent111111111111111111111111111111111";
+const SYSVAR_CLOCK: &str = "SysvarC1ock11111111111111111111111111111111";
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+const B58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+fn base58(bytes: &[u8]) -> String {
+    let mut n = num_bigint(bytes);
+    let mut out = String::new();
+    while !n.is_empty() {
+        let mut rem = 0u32;
+        let mut next = Vec::with_capacity(n.len());
+        for &limb in &n {
+            let acc = (rem as u64) << 32 | limb as u64;
+            let q = (acc / 58) as u32;
+            rem = (acc % 58) as u32;
+            if !next.is_empty() || q != 0 {
+                next.push(q);
+            }
+        }
+        out.push(B58.as_bytes()[rem as usize] as char);
+        n = next;
+    }
+    for &b in bytes {
+        if b == 0 {
+            out.push('1');
+        } else {
+            break;
+        }
+    }
+    out.chars().rev().collect()
+}
+
+fn num_bigint(bytes: &[u8]) -> Vec<u32> {
+    // big-endian u32 limbs
+    let mut n: Vec<u32> = Vec::new();
+    for &b in bytes {
+        // n = n * 256 + b
+        let mut carry = b as u64;
+        for limb in n.iter_mut().rev() {
+            let acc = (*limb as u64) << 8 | carry;
+            *limb = (acc & 0xFFFF_FFFF) as u32;
+            carry = acc >> 32;
+        }
+        if carry != 0 {
+            n.insert(0, carry as u32);
+        }
+    }
+    n
+}
+
+fn fetch_config(client: &RpcClient, config: &Pubkey) -> Option<subscription_controller::Config> {
+    let account = client.get_account(config).ok()?;
+    subscription_controller::Config::try_deserialize(&mut account.data.as_slice()).ok()
+}
+
+fn print_config(client: &RpcClient, config: &Pubkey) {
+    if let Some(state) = fetch_config(client, config) {
+        println!("on-chain config now:");
+        println!("  admin       : {}", state.admin);
+        if state.puller_keys.is_empty() {
+            println!("  puller keys : <EMPTY — KILL SWITCH: no key can pull>");
+        } else {
+            for k in state.puller_keys {
+                println!("  puller key  : {k}");
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() < 3 {
-        eprintln!("usage: admin-cli <program-id> <admin-keypair-path> <rpc-url> [puller-key ...]");
+    if args.len() < 4 {
+        eprintln!("usage: admin-cli <program-id> <signer-keypair|print> <rpc-url> keys  [puller-key ...]");
+        eprintln!("       admin-cli <program-id> <signer-keypair|print> <rpc-url> admin <new-admin>");
         std::process::exit(2);
     }
     let program_id = Pubkey::from_str(&args[0]).expect("invalid program id");
-    let admin = read_keypair_file(&args[1]).expect("cannot read admin keypair");
+    let print_only = args[1] == "print";
+    let tx_payer: Option<Pubkey> = args[1]
+        .strip_prefix("tx:")
+        .map(|p| Pubkey::from_str(p).expect("invalid tx:<pubkey> payer"));
     // "confirmed", not the default "finalized": deploy.sh runs this right
     // after `solana program deploy` (which confirms at "confirmed"), and a
     // finalized-state preflight would simulate against the pre-upgrade
@@ -30,68 +138,202 @@ fn main() {
         args[2].clone(),
         solana_commitment_config::CommitmentConfig::confirmed(),
     );
-    let puller_keys: Vec<Pubkey> = args[3..]
-        .iter()
-        .map(|k| Pubkey::from_str(k).expect("invalid puller key"))
-        .collect();
+    let command = args[3].as_str();
 
     let (config, _) =
         Pubkey::find_program_address(&[subscription_controller::CONFIG_SEED], &program_id);
 
-    let ix = if client.get_account(&config).is_err() {
-        println!("config {config} not found — initializing (admin = {})", admin.pubkey());
-        Instruction::new_with_bytes(
-            program_id,
-            &subscription_controller::instruction::Initialize {
-                puller_keys: puller_keys.clone(),
-            }
-            .data(),
-            subscription_controller::accounts::Initialize {
-                config,
-                admin: admin.pubkey(),
-                system_program: anchor_lang::system_program::ID,
-            }
-            .to_account_metas(None),
-        )
+    // Who must sign as admin: in direct mode, the keypair; in print mode, the
+    // CURRENT on-chain admin (e.g. the Squads vault) — read from the config.
+    let admin_pubkey: Pubkey;
+    let keypair = if print_only {
+        let state = fetch_config(&client, &config)
+            .expect("print mode needs an existing config (initialize directly first)");
+        admin_pubkey = state.admin;
+        None
+    } else if let Some(payer) = tx_payer {
+        admin_pubkey = payer;
+        None
     } else {
-        println!("config {config} exists — updating puller keys");
-        Instruction::new_with_bytes(
-            program_id,
-            &subscription_controller::instruction::SetPullerKeys {
-                puller_keys: puller_keys.clone(),
-            }
-            .data(),
-            subscription_controller::accounts::SetPullerKeys {
-                config,
-                admin: admin.pubkey(),
-            }
-            .to_account_metas(None),
-        )
+        let kp = read_keypair_file(&args[1]).expect("cannot read signer keypair file");
+        admin_pubkey = kp.pubkey();
+        Some(kp)
     };
 
+    let ix = match command {
+        "keys" => {
+            let puller_keys: Vec<Pubkey> = args[4..]
+                .iter()
+                .map(|k| Pubkey::from_str(k).expect("invalid puller key"))
+                .collect();
+            if !print_only && client.get_account(&config).is_err() {
+                println!("config {config} not found — initializing (admin = {admin_pubkey})");
+                Instruction::new_with_bytes(
+                    program_id,
+                    &subscription_controller::instruction::Initialize { puller_keys }.data(),
+                    subscription_controller::accounts::Initialize {
+                        config,
+                        admin: admin_pubkey,
+                        system_program: anchor_lang::system_program::ID,
+                    }
+                    .to_account_metas(None),
+                )
+            } else {
+                Instruction::new_with_bytes(
+                    program_id,
+                    &subscription_controller::instruction::SetPullerKeys { puller_keys }.data(),
+                    subscription_controller::accounts::SetPullerKeys {
+                        config,
+                        admin: admin_pubkey,
+                    }
+                    .to_account_metas(None),
+                )
+            }
+        }
+        "admin" => {
+            let new_admin =
+                Pubkey::from_str(args.get(4).expect("usage: ... admin <new-admin>"))
+                    .expect("invalid new-admin pubkey");
+            println!("set_admin → {new_admin}");
+            Instruction::new_with_bytes(
+                program_id,
+                &subscription_controller::instruction::SetAdmin { new_admin }.data(),
+                subscription_controller::accounts::SetPullerKeys {
+                    config,
+                    admin: admin_pubkey,
+                }
+                .to_account_metas(None),
+            )
+        }
+        "show" => {
+            print_config(&client, &config);
+            return;
+        }
+        "close" => {
+            // Loader v3 `Close` (variant 5) on the ProgramData account —
+            // undeploys the program, refunds its rent deposit to <recipient>,
+            // and burns the program id forever. Signed by the upgrade
+            // authority.
+            let recipient = Pubkey::from_str(
+                args.get(4).expect("usage: ... close <recipient>"),
+            )
+            .expect("invalid recipient");
+            let loader = Pubkey::from_str(LOADER).unwrap();
+            let (programdata, _) =
+                Pubkey::find_program_address(&[program_id.as_ref()], &loader);
+            println!("close program {program_id} — rent refund → {recipient}");
+            Instruction::new_with_bytes(
+                loader,
+                &5u32.to_le_bytes(),
+                vec![
+                    AccountMeta::new(programdata, false),
+                    AccountMeta::new(recipient, false),
+                    AccountMeta::new_readonly(admin_pubkey, true),
+                    AccountMeta::new(program_id, false),
+                ],
+            )
+        }
+        "transfer" => {
+            // System transfer FROM the signer — used by the scripts to fund a
+            // temporary fee payer from the authority wallet (browser popup).
+            let to = Pubkey::from_str(
+                args.get(4).expect("usage: ... transfer <to> <lamports>"),
+            )
+            .expect("invalid recipient");
+            let lamports: u64 = args
+                .get(5)
+                .expect("usage: ... transfer <to> <lamports>")
+                .parse()
+                .expect("invalid lamports");
+            let system = Pubkey::from_str("11111111111111111111111111111111").unwrap();
+            let mut data = 2u32.to_le_bytes().to_vec();
+            data.extend_from_slice(&lamports.to_le_bytes());
+            println!("transfer {lamports} lamports {admin_pubkey} → {to}");
+            Instruction::new_with_bytes(
+                system,
+                &data,
+                vec![
+                    AccountMeta::new(admin_pubkey, true),
+                    AccountMeta::new(to, false),
+                ],
+            )
+        }
+        "upgrade" => {
+            let buffer = Pubkey::from_str(
+                args.get(4).expect("usage: ... upgrade <buffer-address>"),
+            )
+            .expect("invalid buffer address");
+            let loader = Pubkey::from_str(LOADER).unwrap();
+            let (programdata, _) =
+                Pubkey::find_program_address(&[program_id.as_ref()], &loader);
+            println!("upgrade {program_id} from buffer {buffer} (authority {admin_pubkey})");
+            // Loader v3 `Upgrade` (enum variant 3). Spill (buffer-rent refund)
+            // goes to the authority.
+            Instruction::new_with_bytes(
+                loader,
+                &3u32.to_le_bytes(),
+                vec![
+                    AccountMeta::new(programdata, false),
+                    AccountMeta::new(program_id, false),
+                    AccountMeta::new(buffer, false),
+                    AccountMeta::new(admin_pubkey, false),
+                    AccountMeta::new_readonly(Pubkey::from_str(SYSVAR_RENT).unwrap(), false),
+                    AccountMeta::new_readonly(Pubkey::from_str(SYSVAR_CLOCK).unwrap(), false),
+                    AccountMeta::new_readonly(admin_pubkey, true),
+                ],
+            )
+        }
+        other => {
+            eprintln!("unknown command '{other}' (expected 'keys', 'admin', 'upgrade' or 'show')");
+            std::process::exit(2);
+        }
+    };
+
+    if let Some(payer) = tx_payer {
+        let blockhash = client.get_latest_blockhash().expect("get blockhash");
+        let message = solana_message::Message::new_with_blockhash(
+            &[ix],
+            Some(&payer),
+            &blockhash,
+        );
+        let tx = Transaction::new_unsigned(message);
+        let bytes = bincode::serialize(&tx).expect("serialize transaction");
+        println!("(sign within ~60s — the blockhash expires)");
+        println!("UNSIGNED_TX_B64:{}", base64(&bytes));
+        return;
+    }
+
+    if print_only {
+        println!();
+        println!("Unsigned instruction for the Squads transaction builder");
+        println!("(create a tx in the Squad that owns admin {admin_pubkey}):");
+        println!();
+        println!("  Program ID : {program_id}");
+        println!("  Accounts   :");
+        for (i, meta) in ix.accounts.iter().enumerate() {
+            let mut flags = Vec::new();
+            if meta.is_signer {
+                flags.push("signer");
+            }
+            if meta.is_writable {
+                flags.push("writable");
+            }
+            println!("    {}. {}  [{}]", i + 1, meta.pubkey, flags.join(", "));
+        }
+        println!("  Data (base58): {}", base58(&ix.data));
+        println!("  Data (hex)   : {}", ix.data.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        println!();
+        println!("The 'signer' account is the vault — Squads signs it at execution.");
+        return;
+    }
+
+    let keypair = keypair.unwrap();
     let blockhash = client.get_latest_blockhash().expect("get blockhash");
-    let tx = Transaction::new_signed_with_payer(
-        &[ix],
-        Some(&admin.pubkey()),
-        &[&admin],
-        blockhash,
-    );
+    let tx =
+        Transaction::new_signed_with_payer(&[ix], Some(&keypair.pubkey()), &[&keypair], blockhash);
     let sig = client
         .send_and_confirm_transaction(&tx)
         .expect("transaction failed");
     println!("confirmed: {sig}");
-
-    let account = client.get_account(&config).expect("fetch config");
-    let state =
-        subscription_controller::Config::try_deserialize(&mut account.data.as_slice())
-            .expect("decode config");
-    println!("on-chain config now:");
-    println!("  admin       : {}", state.admin);
-    if state.puller_keys.is_empty() {
-        println!("  puller keys : <EMPTY — KILL SWITCH: no key can pull>");
-    } else {
-        for k in state.puller_keys {
-            println!("  puller key  : {k}");
-        }
-    }
+    print_config(&client, &config);
 }

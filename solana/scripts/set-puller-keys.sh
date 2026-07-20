@@ -4,11 +4,17 @@
 # build, no deploy: the audited program code is untouched. Initializes the
 # config automatically on first use.
 #
+# Signing (2nd arg):
+#   (default)  browser wallet popup via the localhost bridge — the key never
+#              leaves the wallet extension;
+#   --paste    legacy: paste the base58 secret key at a hidden prompt;
+#   --print    Squads: print the instruction for the transaction builder.
+#
 # Rotation:    list old+new keys in the .env → run this → flip the backend's
 #              Key Vault secret → remove the old key → run this again.
 # Kill switch: set PULLER_KEYS="" → run this. Resume: restore keys → run.
 #
-# Usage: scripts/set-puller-keys.sh <local|dev|prod>
+# Usage: scripts/set-puller-keys.sh <local|dev|prod> [--paste|--print]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/_wallet.sh
@@ -35,9 +41,41 @@ else
   echo "puller keys : $KEYS"
 fi
 echo
-prompt_wallet "$UPGRADE_AUTHORITY"
-read -rp "Apply to the on-chain config on MAINNET? Type 'apply' to proceed: " CONFIRM
-[[ "$CONFIRM" == "apply" ]] || { echo "aborted"; exit 1; }
 
-# shellcheck disable=SC2086 — KEYS is intentionally word-split
-cargo run -q -p admin-cli -- "$PROGRAM_ID" "$WALLET" "$RPC_URL" $KEYS
+MODE="${2:-}"
+
+# Squads mode — the admin is the vault, so nothing is signed here; print the
+# instruction for the Squads transaction builder.
+if [[ "$MODE" == "--print" ]]; then
+  # shellcheck disable=SC2086 — KEYS is intentionally word-split
+  cargo run -q -p admin-cli -- "$PROGRAM_ID" print "$RPC_URL" keys $KEYS
+  exit 0
+fi
+
+# Legacy paste mode.
+if [[ "$MODE" == "--paste" ]]; then
+  prompt_wallet "$UPGRADE_AUTHORITY"
+  read -rp "Apply to the on-chain config on MAINNET? Type 'apply' to proceed: " CONFIRM
+  [[ "$CONFIRM" == "apply" ]] || { echo "aborted"; exit 1; }
+  # shellcheck disable=SC2086 — KEYS is intentionally word-split
+  cargo run -q -p admin-cli -- "$PROGRAM_ID" "$WALLET" "$RPC_URL" keys $KEYS
+  exit 0
+fi
+
+# Default: browser wallet popup (localhost bridge). The wallet shows the
+# transaction and IS the confirmation step.
+while true; do
+  # shellcheck disable=SC2086 — KEYS is intentionally word-split
+  B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" keys $KEYS \
+        | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
+  [[ -n "$B64" ]] || { echo "error: could not build the transaction" >&2; exit 1; }
+  if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$UPGRADE_AUTHORITY"); then
+    echo "signature: $SIG"
+    solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1 || sleep 2
+    cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show || true
+    exit 0
+  fi
+  echo
+  read -rp "Not signed (rejected or blockhash expired). Retry with a fresh transaction? [y/N] " AGAIN
+  [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || { echo "aborted"; exit 1; }
+done

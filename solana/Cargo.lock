@@ -23,8 +23,10 @@ name = "admin-cli"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "bincode",
  "solana-commitment-config",
  "solana-keypair",
+ "solana-message",
  "solana-rpc-client",
  "solana-signer",
  "solana-transaction",

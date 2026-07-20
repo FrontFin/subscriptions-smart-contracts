@@ -112,6 +112,14 @@ pub mod subscription_controller {
         Ok(())
     }
 
+    /// Admin: hand the config to a new admin (e.g. a Squads vault or another
+    /// wallet). ONE-STEP: a typo in `new_admin` orphans the config — the only
+    /// recovery is a program upgrade. Verify the address twice.
+    pub fn set_admin(ctx: Context<SetPullerKeys>, new_admin: Pubkey) -> Result<()> {
+        ctx.accounts.config.admin = new_admin;
+        Ok(())
+    }
+
     /// Puller key: gate + forward one native pull, signing as `MeshDelegate`.
     pub fn pull<'info>(
         ctx: Context<'info, Pull<'info>>,
