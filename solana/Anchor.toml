@@ -1,0 +1,14 @@
+[toolchain]
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+subscription_controller = "GowYj1dH8kM9sD88cEFk8PExCkct7AqLWGvTkWz6evoD"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+# Tests are pure Rust/LiteSVM: run `./test.sh` (builds the test-hot variant first).
