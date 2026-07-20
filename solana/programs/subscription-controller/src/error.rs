@@ -11,4 +11,6 @@ pub enum ControllerError {
     WrongTargetProgram,
     #[msg("Puller key list exceeds MAX_PULLER_KEYS")]
     TooManyPullerKeys,
+    #[msg("Forwarded instruction is not the native recurring pull_payment")]
+    UnexpectedNativeInstruction,
 }

@@ -40,43 +40,67 @@ struct Env {
     program_id: Pubkey,
     delegate: Pubkey,
     config: Pubkey,
+    program_data: Pubkey,
     admin: Keypair,
     pullers: [Keypair; 2],
 }
 
-fn config_ix(env: &Env, data: &[u8], admin: Pubkey, init: bool) -> Instruction {
-    let metas = if init {
-        subscription_controller::accounts::Initialize {
-            config: env.config,
-            admin,
-            system_program: anchor_lang::system_program::ID,
-        }
-        .to_account_metas(None)
-    } else {
-        subscription_controller::accounts::SetPullerKeys {
-            config: env.config,
-            admin,
-        }
-        .to_account_metas(None)
-    };
-    Instruction::new_with_bytes(env.program_id, data, metas)
+/// A valid native `pull_payment` payload: disc 5 + 72 bytes = 73 total. The
+/// controller pins disc + length; the contents beyond that only matter once
+/// the CPI reaches the (in most tests, absent) native program.
+fn valid_native_pull_data() -> Vec<u8> {
+    let mut d = vec![5u8];
+    d.extend(std::iter::repeat(0u8).take(72));
+    d
 }
 
 fn initialize_ix(env: &Env, admin: Pubkey, puller_keys: Vec<Pubkey>) -> Instruction {
-    config_ix(
-        env,
+    Instruction::new_with_bytes(
+        env.program_id,
         &subscription_controller::instruction::Initialize { puller_keys }.data(),
-        admin,
-        true,
+        subscription_controller::accounts::Initialize {
+            config: env.config,
+            admin,
+            program_data: env.program_data,
+            system_program: anchor_lang::system_program::ID,
+        }
+        .to_account_metas(None),
     )
 }
 
-fn set_puller_keys_ix(env: &Env, admin: Pubkey, puller_keys: Vec<Pubkey>) -> Instruction {
-    config_ix(
-        env,
-        &subscription_controller::instruction::SetPullerKeys { puller_keys }.data(),
+fn admin_action_metas(env: &Env, admin: Pubkey) -> Vec<anchor_lang::solana_program::instruction::AccountMeta> {
+    subscription_controller::accounts::AdminAction {
+        config: env.config,
         admin,
-        false,
+    }
+    .to_account_metas(None)
+}
+
+fn set_puller_keys_ix(env: &Env, admin: Pubkey, puller_keys: Vec<Pubkey>) -> Instruction {
+    Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::SetPullerKeys { puller_keys }.data(),
+        admin_action_metas(env, admin),
+    )
+}
+
+fn propose_admin_ix(env: &Env, admin: Pubkey, new_admin: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::ProposeAdmin { new_admin }.data(),
+        admin_action_metas(env, admin),
+    )
+}
+
+fn accept_admin_ix(env: &Env, new_admin: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::AcceptAdmin {}.data(),
+        subscription_controller::accounts::AcceptAdmin {
+            config: env.config,
+            new_admin,
+        }
+        .to_account_metas(None),
     )
 }
 
@@ -96,11 +120,35 @@ fn setup() -> Env {
     let admin = Keypair::new();
     svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
 
+    // `initialize` is gated to the program's upgrade authority. LiteSVM's
+    // add_program doesn't create a ProgramData account, so fabricate one whose
+    // recorded upgrade authority is `admin`.
+    use anchor_lang::solana_program::bpf_loader_upgradeable::{self, UpgradeableLoaderState};
+    let (program_data, _) =
+        Pubkey::find_program_address(&[program_id.as_ref()], &bpf_loader_upgradeable::ID);
+    let pd_data = bincode::serialize(&UpgradeableLoaderState::ProgramData {
+        slot: 0,
+        upgrade_authority_address: Some(admin.pubkey()),
+    })
+    .unwrap();
+    svm.set_account(
+        program_data,
+        solana_account::Account {
+            lamports: 1_000_000_000,
+            data: pd_data,
+            owner: bpf_loader_upgradeable::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
     let mut env = Env {
         svm,
         program_id,
         delegate,
         config,
+        program_data,
         admin: admin.insecure_clone(),
         pullers,
     };
@@ -111,9 +159,18 @@ fn setup() -> Env {
 }
 
 fn pull_ix(env: &Env, puller_key: Pubkey, subscriptions_program: Pubkey) -> Instruction {
+    pull_ix_data(env, puller_key, subscriptions_program, valid_native_pull_data())
+}
+
+fn pull_ix_data(
+    env: &Env,
+    puller_key: Pubkey,
+    subscriptions_program: Pubkey,
+    native_data: Vec<u8>,
+) -> Instruction {
     Instruction::new_with_bytes(
         env.program_id,
-        &subscription_controller::instruction::Pull { native_data: vec![] }.data(),
+        &subscription_controller::instruction::Pull { native_data }.data(),
         subscription_controller::accounts::Pull {
             delegate: env.delegate,
             puller_key,
@@ -149,6 +206,70 @@ fn initialize_cannot_run_twice() {
     let admin = env.admin.insecure_clone();
     let ix = initialize_ix(&env, admin.pubkey(), vec![Pubkey::new_unique()]);
     send(&mut env, ix, &admin, &[&admin]).expect_err("config must be initialize-once");
+}
+
+#[test]
+fn initialize_requires_the_upgrade_authority() {
+    // Fresh program, no config yet; ProgramData records `real_authority` as
+    // the program's upgrade authority. An unrelated caller must NOT be able to
+    // front-run initialize and seize admin.
+    use anchor_lang::solana_program::bpf_loader_upgradeable::{self, UpgradeableLoaderState};
+
+    let program_id = subscription_controller::id();
+    let mut svm = LiteSVM::new();
+    svm.add_program(
+        program_id,
+        include_bytes!("../../../target/deploy/subscription_controller.so"),
+    )
+    .unwrap();
+    let (config, _) = Pubkey::find_program_address(&[CONFIG_SEED], &program_id);
+    let (program_data, _) =
+        Pubkey::find_program_address(&[program_id.as_ref()], &bpf_loader_upgradeable::ID);
+
+    let real_authority = Keypair::new();
+    let attacker = Keypair::new();
+    svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    let pd = bincode::serialize(&UpgradeableLoaderState::ProgramData {
+        slot: 0,
+        upgrade_authority_address: Some(real_authority.pubkey()),
+    })
+    .unwrap();
+    svm.set_account(
+        program_data,
+        solana_account::Account {
+            lamports: 1_000_000_000,
+            data: pd,
+            owner: bpf_loader_upgradeable::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+
+    // Attacker (not the upgrade authority) tries to initialize → rejected.
+    let ix = Instruction::new_with_bytes(
+        program_id,
+        &subscription_controller::instruction::Initialize { puller_keys: vec![] }.data(),
+        subscription_controller::accounts::Initialize {
+            config,
+            admin: attacker.pubkey(),
+            program_data,
+            system_program: anchor_lang::system_program::ID,
+        }
+        .to_account_metas(None),
+    );
+    let blockhash = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(&[ix], Some(&attacker.pubkey()), &blockhash);
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&attacker]).unwrap();
+    let err = svm
+        .send_transaction(tx)
+        .expect_err("only the upgrade authority may initialize");
+    assert!(
+        err.meta.logs.join("\n").contains("Unauthorized"),
+        "expected Unauthorized, got:\n{}",
+        err.meta.logs.join("\n")
+    );
 }
 
 #[test]
@@ -203,35 +324,61 @@ fn rotation_is_a_single_transaction() {
 }
 
 #[test]
-fn set_admin_hands_over_and_locks_out_the_old_admin() {
+fn admin_handover_is_two_step() {
     let mut env = setup();
     let old_admin = env.admin.insecure_clone();
     let new_admin = Keypair::new();
-    env.svm.airdrop(&new_admin.pubkey(), 1_000_000_000).unwrap();
+    let outsider = Keypair::new();
+    for k in [&new_admin, &outsider] {
+        env.svm.airdrop(&k.pubkey(), 1_000_000_000).unwrap();
+    }
 
-    // Non-admin cannot take over.
-    let ix = config_ix(
-        &env,
-        &subscription_controller::instruction::SetAdmin { new_admin: new_admin.pubkey() }.data(),
-        new_admin.pubkey(),
-        false,
-    );
-    send(&mut env, ix, &new_admin, &[&new_admin]).expect_err("non-admin cannot set_admin");
+    // Only the current admin may propose.
+    let ix = propose_admin_ix(&env, outsider.pubkey(), outsider.pubkey());
+    send(&mut env, ix, &outsider, &[&outsider]).expect_err("non-admin cannot propose");
 
-    // Admin hands over (e.g. to a Squads vault).
-    let ix = config_ix(
-        &env,
-        &subscription_controller::instruction::SetAdmin { new_admin: new_admin.pubkey() }.data(),
-        old_admin.pubkey(),
-        false,
-    );
-    send(&mut env, ix, &old_admin, &[&old_admin]).expect("admin hands over");
+    // Propose the new admin — power has NOT moved yet.
+    let ix = propose_admin_ix(&env, old_admin.pubkey(), new_admin.pubkey());
+    send(&mut env, ix, &old_admin, &[&old_admin]).expect("admin proposes handover");
 
-    // Old admin is locked out; new admin can update keys.
+    // A non-pending signer cannot accept; the old admin is still in charge.
+    let ix = accept_admin_ix(&env, outsider.pubkey());
+    send(&mut env, ix, &outsider, &[&outsider]).expect_err("only the pending admin accepts");
+    let ix = set_puller_keys_ix(&env, new_admin.pubkey(), vec![]);
+    send(&mut env, ix, &new_admin, &[&new_admin])
+        .expect_err("proposed admin has no power until it accepts");
+    let ix = set_puller_keys_ix(&env, old_admin.pubkey(), vec![old_admin.pubkey()]);
+    send(&mut env, ix, &old_admin, &[&old_admin]).expect("old admin still in charge pre-accept");
+
+    // Pending admin accepts → power transfers.
+    let ix = accept_admin_ix(&env, new_admin.pubkey());
+    send(&mut env, ix, &new_admin, &[&new_admin]).expect("pending admin accepts");
+
+    // Old admin locked out; new admin in control.
     let ix = set_puller_keys_ix(&env, old_admin.pubkey(), vec![]);
-    send(&mut env, ix, &old_admin, &[&old_admin]).expect_err("old admin locked out");
+    send(&mut env, ix, &old_admin, &[&old_admin]).expect_err("old admin locked out after handover");
     let ix = set_puller_keys_ix(&env, new_admin.pubkey(), vec![new_admin.pubkey()]);
-    send(&mut env, ix, &new_admin, &[&new_admin]).expect("new admin updates keys");
+    send(&mut env, ix, &new_admin, &[&new_admin]).expect("new admin now in control");
+}
+
+#[test]
+fn pull_rejects_non_pull_payment_instruction() {
+    let mut env = setup();
+    let puller = env.pullers[0].insecure_clone();
+    env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+
+    // Listed key, correct target, but a non-pull_payment discriminator: the
+    // controller refuses to forward it (before any CPI).
+    let mut wrong = vec![2u8]; // create_recurring_delegation, not pull_payment
+    wrong.extend(std::iter::repeat(0u8).take(72));
+    let ix = pull_ix_data(&env, puller.pubkey(), SUBSCRIPTIONS_PROGRAM, wrong);
+    let err = send(&mut env, ix, &puller, &[&puller]).expect_err("non-pull_payment rejected");
+    assert!(err.meta.logs.join("\n").contains("UnexpectedNativeInstruction"));
+
+    // Wrong length with the right discriminator is also rejected.
+    let ix = pull_ix_data(&env, puller.pubkey(), SUBSCRIPTIONS_PROGRAM, vec![5u8]);
+    let err = send(&mut env, ix, &puller, &[&puller]).expect_err("wrong length rejected");
+    assert!(err.meta.logs.join("\n").contains("UnexpectedNativeInstruction"));
 }
 
 #[test]

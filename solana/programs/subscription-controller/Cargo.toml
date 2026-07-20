@@ -24,9 +24,11 @@ custom-panic = []
 
 [dependencies]
 anchor-lang = "1.0.1"
+solana-security-txt = "1.1.1"
 
 [dev-dependencies]
 litesvm = "0.10.0"
+bincode = "1"
 solana-account = "3.4.0"
 solana-message = "3.0.1"
 solana-transaction = "3.0.2"

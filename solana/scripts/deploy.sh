@@ -112,6 +112,21 @@ while true; do
 done
 $INITIALIZED || echo "⚠️  Config NOT initialized — pulls will fail until you run: scripts/set-puller-keys.sh $ENV" >&2
 
+# Front-run guard: `initialize` is permissionless, so confirm WE own the
+# resulting config. If someone front-ran init, they'd be admin instead —
+# abort loudly rather than let you wire a backend to a config you don't
+# control (griefing, not theft: no delegations exist here yet).
+if $INITIALIZED; then
+  ON_CHAIN_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show 2>/dev/null \
+    | awk '$1=="admin"{print $3}')
+  if [[ "$ON_CHAIN_ADMIN" != "$UPGRADE_AUTHORITY" ]]; then
+    echo "🛑 config admin is $ON_CHAIN_ADMIN, expected $UPGRADE_AUTHORITY — initialize was likely front-run." >&2
+    echo "   Do NOT wire the backend to $PROGRAM_ID. Close it (scripts/close.sh $ENV) and redeploy for a fresh id." >&2
+    exit 1
+  fi
+  echo "verified: config admin = $UPGRADE_AUTHORITY"
+fi
+
 PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID")
 {
   echo "PROGRAM_ID=$PROGRAM_ID"

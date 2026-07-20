@@ -3,7 +3,8 @@
 //!
 //! Usage:
 //!   admin-cli <program-id> <signer> <rpc-url> keys    [puller-key ...]
-//!   admin-cli <program-id> <signer> <rpc-url> admin   <new-admin>
+//!   admin-cli <program-id> <signer> <rpc-url> propose-admin <new-admin>
+//!   admin-cli <program-id> <signer> <rpc-url> accept-admin
 //!   admin-cli <program-id> <signer> <rpc-url> upgrade <buffer-address>
 //!   admin-cli <program-id> <signer> <rpc-url> show
 //!   admin-cli <program-id> <signer> <rpc-url> transfer <to> <lamports>
@@ -149,7 +150,13 @@ fn main() {
     let keypair = if print_only {
         let state = fetch_config(&client, &config)
             .expect("print mode needs an existing config (initialize directly first)");
-        admin_pubkey = state.admin;
+        // accept-admin is signed by the PENDING admin; everything else by the
+        // current admin.
+        admin_pubkey = if command == "accept-admin" {
+            state.pending_admin
+        } else {
+            state.admin
+        };
         None
     } else if let Some(payer) = tx_payer {
         admin_pubkey = payer;
@@ -168,12 +175,19 @@ fn main() {
                 .collect();
             if !print_only && client.get_account(&config).is_err() {
                 println!("config {config} not found — initializing (admin = {admin_pubkey})");
+                // ProgramData PDA under the BPF upgradeable loader; the program
+                // enforces its upgrade authority == admin.
+                let (program_data, _) = Pubkey::find_program_address(
+                    &[program_id.as_ref()],
+                    &anchor_lang::solana_program::bpf_loader_upgradeable::ID,
+                );
                 Instruction::new_with_bytes(
                     program_id,
                     &subscription_controller::instruction::Initialize { puller_keys }.data(),
                     subscription_controller::accounts::Initialize {
                         config,
                         admin: admin_pubkey,
+                        program_data,
                         system_program: anchor_lang::system_program::ID,
                     }
                     .to_account_metas(None),
@@ -182,7 +196,7 @@ fn main() {
                 Instruction::new_with_bytes(
                     program_id,
                     &subscription_controller::instruction::SetPullerKeys { puller_keys }.data(),
-                    subscription_controller::accounts::SetPullerKeys {
+                    subscription_controller::accounts::AdminAction {
                         config,
                         admin: admin_pubkey,
                     }
@@ -190,17 +204,31 @@ fn main() {
                 )
             }
         }
-        "admin" => {
+        "propose-admin" => {
+            // Step 1 of the handover, signed by the CURRENT admin.
             let new_admin =
-                Pubkey::from_str(args.get(4).expect("usage: ... admin <new-admin>"))
+                Pubkey::from_str(args.get(4).expect("usage: ... propose-admin <new-admin>"))
                     .expect("invalid new-admin pubkey");
-            println!("set_admin → {new_admin}");
+            println!("propose_admin → {new_admin} (they must then accept-admin)");
             Instruction::new_with_bytes(
                 program_id,
-                &subscription_controller::instruction::SetAdmin { new_admin }.data(),
-                subscription_controller::accounts::SetPullerKeys {
+                &subscription_controller::instruction::ProposeAdmin { new_admin }.data(),
+                subscription_controller::accounts::AdminAction {
                     config,
                     admin: admin_pubkey,
+                }
+                .to_account_metas(None),
+            )
+        }
+        "accept-admin" => {
+            // Step 2, signed by the PENDING admin (the tx:/keypair signer).
+            println!("accept_admin as {admin_pubkey}");
+            Instruction::new_with_bytes(
+                program_id,
+                &subscription_controller::instruction::AcceptAdmin {}.data(),
+                subscription_controller::accounts::AcceptAdmin {
+                    config,
+                    new_admin: admin_pubkey,
                 }
                 .to_account_metas(None),
             )
@@ -284,7 +312,7 @@ fn main() {
             )
         }
         other => {
-            eprintln!("unknown command '{other}' (expected 'keys', 'admin', 'upgrade' or 'show')");
+            eprintln!("unknown command '{other}' (expected keys | propose-admin | accept-admin | upgrade | close | show)");
             std::process::exit(2);
         }
     };

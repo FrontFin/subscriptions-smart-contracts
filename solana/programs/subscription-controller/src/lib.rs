@@ -12,22 +12,40 @@ pub use error::*;
 
 declare_id!("GowYj1dH8kM9sD88cEFk8PExCkct7AqLWGvTkWz6evoD");
 
+// Embedded contact info for security researchers (parsed by explorers —
+// shows as "security.txt" on Solscan). Baked into the binary; applies to an
+// env on its next deploy/upgrade.
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "Mesh Subscription Controller",
+    project_url: "https://www.meshconnect.com",
+    contacts: "email:security@meshconnect.com",
+    policy: "Please report vulnerabilities privately to the contact above. Do not exploit or publicly disclose before a fix is deployed.",
+    preferred_languages: "en"
+}
+
 /// On-chain configuration — the puller-key allowlist lives in DATA, not code,
 /// so key rotation and the kill switch are single transactions that never
 /// modify the (audited) program binary.
 #[account]
 pub struct Config {
-    /// The only key allowed to call `set_puller_keys` (set once, at
-    /// `initialize`, to the initializer).
+    /// The only key allowed to call the admin instructions (set at
+    /// `initialize` to the initializer; changed via the two-step handover).
     pub admin: Pubkey,
     /// Pubkeys allowed to trigger `pull`. EMPTY list = kill switch ("pause"):
     /// no key is authorized, every pull fails `Unauthorized`.
     pub puller_keys: Vec<Pubkey>,
+    /// Two-step admin handover target: `propose_admin` sets it, `accept_admin`
+    /// (signed by it) promotes it. `Pubkey::default()` = none pending.
+    /// NB: do not reorder `Config`'s fields once deployed — the on-chain
+    /// account layout is fixed at creation, and reordering would misread every
+    /// existing config.
+    pub pending_admin: Pubkey,
 }
 
 impl Config {
-    /// 8 discriminator + 32 admin + 4 vec length + the max key list.
-    pub const SPACE: usize = 8 + 32 + 4 + 32 * MAX_PULLER_KEYS;
+    /// 8 discriminator + 32 admin + (4 vec len + max key list) + 32 pending.
+    pub const SPACE: usize = 8 + 32 + (4 + 32 * MAX_PULLER_KEYS) + 32;
 }
 
 #[derive(Accounts)]
@@ -36,19 +54,47 @@ pub struct Initialize<'info> {
     #[account(init, payer = admin, space = Config::SPACE, seeds = [CONFIG_SEED], bump)]
     pub config: Account<'info, Config>,
 
-    /// Becomes the config's admin; pays the config account's rent.
+    /// Becomes the config's admin; pays the config account's rent. Gated to the
+    /// program's upgrade authority (see `program_data`), so `initialize` cannot
+    /// be front-run by an arbitrary caller right after deploy.
     #[account(mut)]
     pub admin: Signer<'info>,
+
+    /// The program's ProgramData account (BPF upgradeable loader). Its recorded
+    /// upgrade authority must equal `admin` — this is what restricts
+    /// `initialize` to whoever controls the deployed program.
+    #[account(
+        seeds = [crate::ID.as_ref()],
+        bump,
+        seeds::program = anchor_lang::solana_program::bpf_loader_upgradeable::ID,
+        constraint = program_data.upgrade_authority_address == Some(admin.key()) @ ControllerError::Unauthorized,
+    )]
+    pub program_data: Account<'info, ProgramData>,
 
     pub system_program: Program<'info, System>,
 }
 
+/// Any admin-gated mutation (set puller keys, propose a new admin).
 #[derive(Accounts)]
-pub struct SetPullerKeys<'info> {
+pub struct AdminAction<'info> {
     #[account(mut, seeds = [CONFIG_SEED], bump, has_one = admin @ ControllerError::Unauthorized)]
     pub config: Account<'info, Config>,
 
     pub admin: Signer<'info>,
+}
+
+/// Second step of the handover: the pending admin claims the role.
+#[derive(Accounts)]
+pub struct AcceptAdmin<'info> {
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump,
+        constraint = config.pending_admin == new_admin.key() @ ControllerError::Unauthorized,
+    )]
+    pub config: Account<'info, Config>,
+
+    pub new_admin: Signer<'info>,
 }
 
 /// Trigger one recurring-delegation pull.
@@ -98,12 +144,13 @@ pub mod subscription_controller {
         let config = &mut ctx.accounts.config;
         config.admin = ctx.accounts.admin.key();
         config.puller_keys = puller_keys;
+        config.pending_admin = Pubkey::default();
         Ok(())
     }
 
     /// Admin: replace the puller-key list. Rotation = list old+new, then
     /// remove old. Kill switch = empty list. One transaction; no upgrade.
-    pub fn set_puller_keys(ctx: Context<SetPullerKeys>, puller_keys: Vec<Pubkey>) -> Result<()> {
+    pub fn set_puller_keys(ctx: Context<AdminAction>, puller_keys: Vec<Pubkey>) -> Result<()> {
         require!(
             puller_keys.len() <= MAX_PULLER_KEYS,
             ControllerError::TooManyPullerKeys
@@ -112,11 +159,21 @@ pub mod subscription_controller {
         Ok(())
     }
 
-    /// Admin: hand the config to a new admin (e.g. a Squads vault or another
-    /// wallet). ONE-STEP: a typo in `new_admin` orphans the config — the only
-    /// recovery is a program upgrade. Verify the address twice.
-    pub fn set_admin(ctx: Context<SetPullerKeys>, new_admin: Pubkey) -> Result<()> {
-        ctx.accounts.config.admin = new_admin;
+    /// Admin: propose a new admin (step 1 of 2). Nothing changes until the
+    /// proposed key calls `accept_admin`, so a typo cannot brick the config —
+    /// re-propose to correct it. Pass `Pubkey::default()` to cancel a pending
+    /// handover.
+    pub fn propose_admin(ctx: Context<AdminAction>, new_admin: Pubkey) -> Result<()> {
+        ctx.accounts.config.pending_admin = new_admin;
+        Ok(())
+    }
+
+    /// Pending admin: accept the handover (step 2 of 2). Signed by the
+    /// proposed key, proving it is controllable before it gains power.
+    pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        config.admin = ctx.accounts.new_admin.key();
+        config.pending_admin = Pubkey::default();
         Ok(())
     }
 
@@ -134,6 +191,16 @@ pub mod subscription_controller {
                 .puller_keys
                 .contains(&ctx.accounts.puller_key.key()),
             ControllerError::Unauthorized
+        );
+
+        // Forward ONLY the native recurring pull_payment (pin its single-byte
+        // discriminator + exact length). A puller key therefore cannot invoke
+        // any other native instruction as the delegatee. Destination/amount
+        // within pull_payment stay caller-chosen (accepted design tradeoff).
+        require!(
+            native_data.first() == Some(&NATIVE_PULL_DISCRIMINATOR)
+                && native_data.len() == NATIVE_PULL_DATA_LEN,
+            ControllerError::UnexpectedNativeInstruction
         );
 
         // Build the CPI instruction from the forwarded accounts, force-signing

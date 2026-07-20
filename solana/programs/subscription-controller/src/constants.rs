@@ -27,3 +27,13 @@ pub const MAX_PULLER_KEYS: usize = 16;
 /// that owns `RecurringDelegation` and enforces the per-period cap / expiry).
 /// Matches `SolanaSubscriptionInstructionBuilder.ProgramId` in FrontBackEnd.
 pub const SUBSCRIPTIONS_PROGRAM: Pubkey = pubkey!("De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44");
+
+/// The native recurring `pull_payment` instruction — single-byte discriminator
+/// and exact data length (`[disc(1)] + amount(8) + delegator(32) + mint(32)`).
+/// `pull` pins these so a puller key can forward ONLY pull_payment as the
+/// delegatee, never any other native instruction. Matches
+/// `PullPaymentRecurringDiscriminator` / `PullPaymentDataLength` in FrontBackEnd.
+/// (Destination and amount WITHIN pull_payment stay caller-chosen — accepted
+/// design tradeoff, mitigated by kill switch + rotation, not by this program.)
+pub const NATIVE_PULL_DISCRIMINATOR: u8 = 5;
+pub const NATIVE_PULL_DATA_LEN: usize = 73;
