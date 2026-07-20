@@ -9,4 +9,6 @@ pub enum ControllerError {
     Unauthorized,
     #[msg("Target program does not match the configured subscriptions program")]
     WrongTargetProgram,
+    #[msg("Puller key list exceeds MAX_PULLER_KEYS")]
+    TooManyPullerKeys,
 }

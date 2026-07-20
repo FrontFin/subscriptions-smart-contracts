@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build the program for an environment, injecting that env's constants
-# (puller keys from scripts/envs/<env>.env, program id pinned there). The
+# Build the program for an environment, injecting that env's program id
+# (puller keys are NOT baked in — they live in the on-chain Config). The
 # committed source always carries the TEST values (scripts/envs/test.env) —
 # deployable-env values exist only in the env files and the built artifacts:
 #

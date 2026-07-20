@@ -44,8 +44,10 @@ scripts/deploy.sh <env>
 The script, in order:
 
 1. Refuses to run if `UPGRADE_AUTHORITY` or `PULLER_KEYS` is missing; warns
-   loudly if `PULLER_KEYS` is empty (that deploys the kill-switch build).
-2. Builds the program with this env's `PULLER_KEYS` baked in.
+   loudly if `PULLER_KEYS` is empty (the on-chain config would be set to the
+   kill switch).
+2. Builds the program (only the program id is compiled in — puller keys
+   live in the on-chain config, next step).
 3. First deploy only: mints a fresh program keypair — its pubkey becomes the
    env's **permanent program id**; the private key is used for this one
    deploy and discarded (it grants nothing afterwards).
@@ -55,7 +57,9 @@ The script, in order:
    rejected unless it derives exactly the configured pubkey.
 5. Prints the plan (env, payer, program id, artifact hash, puller keys) —
    **type `deploy`** to confirm, anything else aborts.
-6. Deploys, then pins the contract address into the `.env` and prints:
+6. Deploys, then syncs the env's `PULLER_KEYS` into the program's on-chain
+   config (creates it on the first deploy) — signed by the same wallet.
+7. Pins the contract address into the `.env` and prints:
 
 ```
 Smart contract address (program id) : <PROGRAM_ID>
@@ -93,20 +97,23 @@ Only then enable real traffic (after the external audit).
 
 ## How to update
 
-Any change = edit, then re-deploy. Same command, same program id, same PDA —
-delegations are never affected:
+Key changes are DATA transactions (edit the `.env`, run `set-puller-keys.sh`)
+— the audited program code is never touched, no re-audit trigger. Only code
+changes redeploy. Program id and PDA never change either way; delegations are
+never affected:
 
 | Change | Edit | Run |
 | --- | --- | --- |
-| Kill switch (pause all pulls) | `PULLER_KEYS=""` | `scripts/deploy.sh <env>` |
-| Resume | restore the keys | `scripts/deploy.sh <env>` |
-| Rotate puller key (zero downtime) | 1) list old+new keys 2) after deploy, flip Key Vault 3) remove old key | `scripts/deploy.sh <env>` after 1 and 3 |
+| Kill switch (pause all pulls) | `PULLER_KEYS=""` | `scripts/set-puller-keys.sh <env>` |
+| Resume | restore the keys | `scripts/set-puller-keys.sh <env>` |
+| Rotate puller key (zero downtime) | 1) list old+new keys 2) after applying, flip Key Vault 3) remove old key | `scripts/set-puller-keys.sh <env>` after 1 and 3 |
 | Change upgrade authority | update `UPGRADE_AUTHORITY` after running → | `solana program set-upgrade-authority <PROGRAM_ID> --new-upgrade-authority <NEW_WALLET>` |
 | Code / retarget native program | source / `constants.rs` | `scripts/deploy.sh <env>` |
 
-Never make the program immutable (`--final`) — upgrades are the kill switch
-and the rotation mechanism. If a new binary outgrows the allocation:
-`solana program extend <PROGRAM_ID> <bytes>`.
+The config admin is the wallet that ran the first deploy (it signed
+`initialize`). Never make the program immutable (`--final`) — code fixes
+still need upgrades. If a new binary outgrows the allocation, the deploy
+script extends it automatically.
 
 ## How to undeploy
 
@@ -131,25 +138,28 @@ each. Own program id → own MeshDelegate PDA → own delegations: one env's
 program can never pull another env's delegations. `test` is not an
 environment — it's the LiteSVM fixture below.
 
-**Design.** The program is stateless: configuration is compile-time
-constants, every admin action is an upgrade. No `initialize`, no config
-account, no admin key. The MeshDelegate PDA derives from
-`["mesh_delegate"]` + the program id only, so upgrades (kill, rotate, code) never
-move it and never invalidate a delegation. `SUBSCRIPTIONS_PROGRAM` (the
-native program CPI'd into) lives in `constants.rs`, identical on all envs.
+**Design.** Three instructions: `initialize` (one-time; creator becomes
+admin), `set_puller_keys` (admin-only; rewrites the on-chain allowlist —
+rotation and kill switch as single transactions that never modify audited
+code), and `pull` (gated by the allowlist, CPIs the native program signing as
+the MeshDelegate PDA). The PDA derives from `["mesh_delegate"]` + the program
+id only, so neither upgrades nor config updates ever move it or invalidate a
+delegation. `SUBSCRIPTIONS_PROGRAM` (the native program CPI'd into) stays a
+compile-time constant, identical on all envs.
 
 **Testing.**
 
 ```bash
-./test.sh                       # 7 LiteSVM tests must pass
+./test.sh                       # 11 LiteSVM tests must pass
 ```
 
-`test` values are what the committed source carries (`scripts/build.sh <env>`
-injects a real env's values into a build, then restores the source). Its
-puller keys derive from public seeds (`[1u8;32]` / `[2u8;32]`) so the suite
-can sign — anyone can reproduce them, which is why `test` is never
-deployable. The suite includes an end-to-end subscribe + pull against the
-real native Subscriptions binary dumped from mainnet
+The committed source carries the `test` program id (`scripts/build.sh <env>`
+injects a real env's id into a build, then restores the source). The suite
+creates the on-chain Config itself with keypairs derived from public seeds
+(`[1u8;32]` / `[2u8;32]`) so it can sign — anyone can reproduce them, which
+is why `test` is never deployable. Covered: config lifecycle (initialize-once,
+admin gating, rotation, kill switch + resume) and an end-to-end subscribe +
+pull against the real native Subscriptions binary dumped from mainnet
 (`tests/fixtures/subscriptions_program.so`).
 
 **Releases.** Record the git commit per deploy;

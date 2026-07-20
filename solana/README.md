@@ -4,9 +4,10 @@ On-chain implementation of the **Mesh-owned Delegatee PDA** design
 ([TDD](../docs/solana-pull-payment-pda-tdd.md)), deliberately reduced to its
 minimal form. The program owns a `MeshDelegate` PDA that is registered as the
 `delegatee` on every recurring delegation. Because the delegatee is a PDA (no
-private key), the operational **puller key** only *triggers* pulls — and every
-admin action (kill switch, puller-key rotation) is a **program upgrade** signed by
-the upgrade authority. There is no admin key and no admin instruction.
+private key), the operational **puller key** only *triggers* pulls. The
+puller-key allowlist lives in an on-chain `Config` account, so rotation and
+the kill switch are single admin transactions that never modify the (audited)
+program code; only code changes are upgrades.
 
 ```
 solana/
@@ -14,37 +15,38 @@ solana/
 ├── test.sh                  # builds the test env + runs the LiteSVM tests
 ├── scripts/
 │   ├── envs/{test,local,dev,prod}.env  # per-env puller keys, upgrade authority, program id (all public)
-│   ├── build.sh <env>       # inject env constants → build → restore source (test values)
-│   ├── deploy.sh <local|dev|prod> # build + deploy an env to mainnet (prompts for wallet key)
-│   └── close.sh  <local|dev|prod> # close an env's program, refund its rent
+│   ├── build.sh <env>       # inject env program id → build → restore source (test id)
+│   ├── deploy.sh <local|dev|prod>          # build + deploy + sync puller keys (prompts for wallet key)
+│   ├── set-puller-keys.sh <local|dev|prod> # rotation / kill switch — one data tx, no deploy
+│   └── close.sh  <local|dev|prod>          # close an env's program, refund its rent
 ├── programs/subscription-controller/
 │   ├── src/
-│   │   ├── lib.rs           # the single `pull` instruction (gate + CPI forwarder)
-│   │   ├── constants.rs     # config baked into the binary (committed = test env)
+│   │   ├── lib.rs           # Config account + initialize / set_puller_keys / pull
+│   │   ├── constants.rs     # protocol constants (seeds, native program id)
 │   │   └── error.rs         # ControllerError
 │   └── tests/
-│       ├── test_controller.rs   # LiteSVM tests (7 passing, incl. end-to-end pull)
+│       ├── test_controller.rs   # LiteSVM tests (11 passing, incl. end-to-end pull)
 │       └── fixtures/
 │           └── subscriptions_program.so # native Subscriptions program, dumped from mainnet
+├── tools/admin-cli/         # sends initialize / set_puller_keys over RPC
 └── DEPLOY.md                # ← deployment & operations guide
 ```
 
-## Design: no state, no admin — upgrades are the admin plane
-
-The program has **one instruction and zero accounts of its own**:
+## Design: one config account, three instructions
 
 | Instruction | Signer | Purpose |
 | --- | --- | --- |
-| `pull(native_data)` | puller | Gate (puller-key listed + target program) then CPI the native pull, signing as `MeshDelegate`. |
+| `initialize(puller_keys)` | admin (once) | Creates the singleton `Config` (seed `["config"]`); the creator becomes admin. Cannot run twice. |
+| `set_puller_keys(puller_keys)` | admin | Rewrites the allowlist. Rotation = old+new, then remove old. Empty list = kill switch. One transaction — audited code untouched. |
+| `pull(native_data)` | puller | Gate (signer listed in `Config.puller_keys` + target program) then CPI the native pull, signing as `MeshDelegate`. |
 
-All configuration is compile-time constants, sourced per environment from
-`scripts/envs/<env>.env` (`scripts/build.sh <env>` injects them; the committed
-source always carries the `test` values):
+Where each setting lives:
 
-| Constant | Source | Meaning | To change it |
-| --- | --- | --- | --- |
-| `PULLER_KEYS` | per-env `.env` — test: public-seed keys; local/dev/prod: real puller key(s) | The keys allowed to trigger `pull`. **Empty list = kill switch ("pause")** (authorizes no one, so every pull fails `Unauthorized`). | Edit the env's `.env`; re-deploy that env. Rotation: list old+new (zero-downtime overlap), flip Key Vault, remove the old key. |
-| `SUBSCRIPTIONS_PROGRAM` | `constants.rs` (same on all envs) — `De1egAFM…9avR44` | The native Subscriptions program CPI'd into (matches `SolanaSubscriptionInstructionBuilder.ProgramId` in FrontBackEnd) | Upgrade |
+| Setting | Where | To change it |
+| --- | --- | --- |
+| Puller-key allowlist | **on-chain `Config` account** (source of truth: the env's `.env` `PULLER_KEYS`) | edit the `.env`, run `scripts/set-puller-keys.sh <env>` — one admin transaction, no build, no deploy. Empty list = kill switch. |
+| Program id | pinned in the env's `.env`; compiled into `declare_id!` per build | fixed at first deploy (never changes) |
+| `SUBSCRIPTIONS_PROGRAM` | compile-time constant, same on all envs — `De1egAFM…9avR44` (matches `SolanaSubscriptionInstructionBuilder.ProgramId`) | code change + upgrade |
 
 Each environment has its own program ID (minted at first deploy, pinned in
 its `.env`) → own `MeshDelegate` PDA, so local/dev/prod coexist on mainnet
@@ -83,13 +85,12 @@ Deployment, environments, the kill-switch runbook, and rotation are in
 
 ### Testing note
 
-The test env's `PULLER_KEYS` are derived from fixed public seeds in the
-test suite (`fixture_puller_keypairs` in `test_controller.rs`; two entries to
-exercise the rotation overlap), so the tests sign with them directly against
-the local build — no private-key files in the repo, no feature flags. The
-keys are publicly derivable by anyone, which is why `test` is never
-deployable; local/dev/prod builds inject the real puller key(s) from their `.env`
-(the `constants_are_the_committed_fixtures` test pins the test values).
+The suite creates the on-chain `Config` itself, using puller keypairs derived
+from fixed public seeds (`fixture_puller_keypairs` in `test_controller.rs`) —
+no private-key files in the repo, no feature flags. The keys are publicly
+derivable by anyone, which is why the `test` build is never deployable. The
+config lifecycle is fully covered: initialize-once, admin gating, rotation as
+a single transaction, kill switch + resume.
 
 The suite includes a full end-to-end test: subscribe (initialize authority +
 create delegation with `MeshDelegate` as delegatee) and pull through the
@@ -102,9 +103,7 @@ if the mainnet program upgrades.
 
 ## Future scope
 
-If admin actions become frequent enough that upgrade-per-change hurts, the
-config-account version of this program (on-chain `pause`, `rotate_puller_key`,
-two-step cold handover, destination allowlist) exists fully tested in the
-`SolanaSubscriptionPDA/controller` prototype and can be restored via a normal
-upgrade — state accounts can be added later without moving the `MeshDelegate`
-PDA, provided its `["mesh_delegate"]` seeds are kept.
+The richer prototype (`SolanaSubscriptionPDA/controller`) also had a two-step
+admin handover and a destination allowlist; either can be added via a normal
+upgrade later — new instructions and account fields never move the
+`MeshDelegate` PDA, provided its `["mesh_delegate"]` seed is kept.

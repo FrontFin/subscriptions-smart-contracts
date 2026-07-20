@@ -1,21 +1,15 @@
-//! LiteSVM tests for the Mesh Subscription Controller (stateless / pull-only).
+//! LiteSVM tests for the Mesh Subscription Controller.
 //!
-//! The program has no state and no admin instructions — the gate is baked in
-//! as constants (see `src/constants.rs`). These tests assert the gate:
-//! only a listed puller key may trigger a pull, and only into the
-//! configured subscriptions program.
+//! The puller-key allowlist lives in the on-chain `Config` account (created
+//! by `initialize`, updated by the admin via `set_puller_keys`) — NOT in the
+//! code. These tests assert the whole lifecycle: initialize, admin gating,
+//! rotation and the kill switch as single data transactions, and the `pull`
+//! gate (only a listed puller key may pull, only into the configured
+//! subscriptions program).
 //!
-//! The committed `PULLER_KEYS` are derived from fixed public seeds (see
-//! `fixture_puller_keypairs`; two entries so the tests exercise rotation
-//! overlap), so the tests sign with them directly against the deployable
-//! build in `target/deploy/` — no private-key files exist in the repo.
-//! Before any real deploy the constants are swapped to the real Mesh puller
-//! key(s) — see DEPLOY.md.
-//!
-//! The kill switch (PULLER_KEYS = empty list) is a compile-time constant
-//! and just means "no signer is authorized" — the same `Unauthorized` path
-//! the unlisted-signer test exercises; the kill build is a one-line,
-//! auditable diff (see DEPLOY.md).
+//! The test puller keypairs are derived from fixed public seeds (see
+//! `fixture_puller_keypairs`) — no private-key files exist in the repo, and
+//! nothing key-related is baked into the binary anymore.
 
 use {
     anchor_lang::{
@@ -23,20 +17,17 @@ use {
         solana_program::instruction::Instruction,
         InstructionData, ToAccountMetas,
     },
-    std::str::FromStr,
     litesvm::LiteSVM,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
     solana_transaction::versioned::VersionedTransaction,
-    subscription_controller::{PULLER_KEYS, SUBSCRIPTIONS_PROGRAM},
+    subscription_controller::{CONFIG_SEED, DELEGATE_SEED, SUBSCRIPTIONS_PROGRAM},
 };
 
-/// The two local-testing puller keys listed in the committed
-/// `constants.rs`. Derived from fixed, public seeds — deliberately NOT
-/// secrets, and no private-key files exist in the repo. Anyone can derive
-/// them, which is why the committed constants must be swapped to the real
-/// puller key(s) before any deploy (DEPLOY.md step 1).
+/// Two puller keypairs the suite signs with. Derived from fixed, public
+/// seeds — deliberately NOT secrets (safe on LiteSVM's throwaway chain; real
+/// envs get their keys via `set-puller-keys.sh`, never from the repo).
 fn fixture_puller_keypairs() -> [Keypair; 2] {
     [
         Keypair::new_from_array([1u8; 32]),
@@ -48,9 +39,49 @@ struct Env {
     svm: LiteSVM,
     program_id: Pubkey,
     delegate: Pubkey,
+    config: Pubkey,
+    admin: Keypair,
     pullers: [Keypair; 2],
 }
 
+fn config_ix(env: &Env, data: &[u8], admin: Pubkey, init: bool) -> Instruction {
+    let metas = if init {
+        subscription_controller::accounts::Initialize {
+            config: env.config,
+            admin,
+            system_program: anchor_lang::system_program::ID,
+        }
+        .to_account_metas(None)
+    } else {
+        subscription_controller::accounts::SetPullerKeys {
+            config: env.config,
+            admin,
+        }
+        .to_account_metas(None)
+    };
+    Instruction::new_with_bytes(env.program_id, data, metas)
+}
+
+fn initialize_ix(env: &Env, admin: Pubkey, puller_keys: Vec<Pubkey>) -> Instruction {
+    config_ix(
+        env,
+        &subscription_controller::instruction::Initialize { puller_keys }.data(),
+        admin,
+        true,
+    )
+}
+
+fn set_puller_keys_ix(env: &Env, admin: Pubkey, puller_keys: Vec<Pubkey>) -> Instruction {
+    config_ix(
+        env,
+        &subscription_controller::instruction::SetPullerKeys { puller_keys }.data(),
+        admin,
+        false,
+    )
+}
+
+/// Fresh SVM with the program loaded and the config initialized to the two
+/// fixture puller keys (admin = a funded throwaway keypair).
 fn setup() -> Env {
     let program_id = subscription_controller::id();
     let mut svm = LiteSVM::new();
@@ -59,14 +90,24 @@ fn setup() -> Env {
     svm.add_program(program_id, bytes).unwrap();
 
     let pullers = fixture_puller_keypairs();
-    let (delegate, _) = Pubkey::find_program_address(&[b"mesh_delegate"], &program_id);
+    let (delegate, _) = Pubkey::find_program_address(&[DELEGATE_SEED], &program_id);
+    let (config, _) = Pubkey::find_program_address(&[CONFIG_SEED], &program_id);
 
-    Env {
+    let admin = Keypair::new();
+    svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
+
+    let mut env = Env {
         svm,
         program_id,
         delegate,
+        config,
+        admin: admin.insecure_clone(),
         pullers,
-    }
+    };
+    let keys = env.pullers.iter().map(|k| k.pubkey()).collect();
+    let ix = initialize_ix(&env, admin.pubkey(), keys);
+    send(&mut env, ix, &admin, &[&admin]).expect("initialize config");
+    env
 }
 
 fn pull_ix(env: &Env, puller_key: Pubkey, subscriptions_program: Pubkey) -> Instruction {
@@ -77,6 +118,7 @@ fn pull_ix(env: &Env, puller_key: Pubkey, subscriptions_program: Pubkey) -> Inst
             delegate: env.delegate,
             puller_key,
             subscriptions_program,
+            config: env.config,
         }
         .to_account_metas(None),
     )
@@ -94,15 +136,101 @@ fn send(
     env.svm.send_transaction(tx).map(|_| ())
 }
 
+// ---------------------------------------------------------------------------
+// Config lifecycle
+// ---------------------------------------------------------------------------
+
 #[test]
-fn constants_are_the_committed_fixtures() {
-    // Test PULLER_KEYS = the real Mesh puller key (so a locally-run backend
-    // can sign pulls; its private key is in Key Vault) + the two seed-derived
-    // test keys the suite signs with (scripts/envs/test.env is the source).
-    let mut expected =
-        vec![Pubkey::from_str("D8BXX8NxgxFN9LifSuDYQ8rTBfd9wfzVAL1KrntMBnU1").unwrap()];
-    expected.extend(fixture_puller_keypairs().iter().map(|k| k.pubkey()));
-    assert_eq!(PULLER_KEYS, &expected[..]);
+fn initialize_cannot_run_twice() {
+    let mut env = setup();
+
+    // A second initialize (even by the same admin) must fail — the config
+    // account already exists, so `init` rejects it. No re-init takeover.
+    let admin = env.admin.insecure_clone();
+    let ix = initialize_ix(&env, admin.pubkey(), vec![Pubkey::new_unique()]);
+    send(&mut env, ix, &admin, &[&admin]).expect_err("config must be initialize-once");
+}
+
+#[test]
+fn set_puller_keys_requires_admin() {
+    let mut env = setup();
+
+    let attacker = Keypair::new();
+    env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = set_puller_keys_ix(&env, attacker.pubkey(), vec![attacker.pubkey()]);
+    let err = send(&mut env, ix, &attacker, &[&attacker])
+        .expect_err("only the admin may change the puller keys");
+    let logs = err.meta.logs.join("\n");
+    assert!(logs.contains("Unauthorized"), "expected Unauthorized, got:\n{logs}");
+
+    // The gate still honors the original list.
+    let puller = env.pullers[0].insecure_clone();
+    env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+    let ix = pull_ix(&env, puller.pubkey(), SUBSCRIPTIONS_PROGRAM);
+    let err = send(&mut env, ix, &puller, &[&puller]).unwrap_err();
+    let logs = err.meta.logs.join("\n");
+    assert!(!logs.contains("Unauthorized"), "original key must still pass the gate");
+}
+
+#[test]
+fn rotation_is_a_single_transaction() {
+    let mut env = setup();
+    let admin = env.admin.insecure_clone();
+    let old = env.pullers[0].insecure_clone();
+    let new = Keypair::new();
+    env.svm.airdrop(&old.pubkey(), 1_000_000_000).unwrap();
+    env.svm.airdrop(&new.pubkey(), 1_000_000_000).unwrap();
+
+    // Rotate: replace the list with [new] only.
+    let ix = set_puller_keys_ix(&env, admin.pubkey(), vec![new.pubkey()]);
+    send(&mut env, ix, &admin, &[&admin]).expect("admin rotates the keys");
+
+    // Old key is out...
+    let ix = pull_ix(&env, old.pubkey(), SUBSCRIPTIONS_PROGRAM);
+    let err = send(&mut env, ix, &old, &[&old]).expect_err("rotated-out key rejected");
+    assert!(err.meta.logs.join("\n").contains("Unauthorized"));
+
+    // ...and the new key passes the gate (failure comes from the CPI into the
+    // not-deployed native program, not from authorization).
+    let ix = pull_ix(&env, new.pubkey(), SUBSCRIPTIONS_PROGRAM);
+    let err = send(&mut env, ix, &new, &[&new]).unwrap_err();
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        !logs.contains("Unauthorized") && !logs.contains("WrongTargetProgram"),
+        "new key must pass the gate, got:\n{logs}"
+    );
+}
+
+#[test]
+fn empty_list_is_the_kill_switch() {
+    let mut env = setup();
+    let admin = env.admin.insecure_clone();
+    let puller = env.pullers[0].insecure_clone();
+    env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+
+    // Kill: empty list. One transaction, no upgrade.
+    let ix = set_puller_keys_ix(&env, admin.pubkey(), vec![]);
+    send(&mut env, ix, &admin, &[&admin]).expect("admin engages the kill switch");
+
+    let ix = pull_ix(&env, puller.pubkey(), SUBSCRIPTIONS_PROGRAM);
+    let err = send(&mut env, ix, &puller, &[&puller]).expect_err("paused: nobody can pull");
+    assert!(err.meta.logs.join("\n").contains("Unauthorized"));
+
+    // Resume: restore the list. The same key pulls again (past the gate).
+    let ix = set_puller_keys_ix(&env, admin.pubkey(), vec![puller.pubkey()]);
+    send(&mut env, ix, &admin, &[&admin]).expect("admin resumes");
+    let ix = pull_ix(&env, puller.pubkey(), SUBSCRIPTIONS_PROGRAM);
+    let err = send(&mut env, ix, &puller, &[&puller]).unwrap_err();
+    assert!(!err.meta.logs.join("\n").contains("Unauthorized"));
+}
+
+// ---------------------------------------------------------------------------
+// Pull gate
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subscriptions_program_constant_is_pinned() {
     assert_eq!(
         SUBSCRIPTIONS_PROGRAM.to_string(),
         "De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44",
@@ -144,8 +272,8 @@ fn pull_is_rejected_for_wrong_target_program() {
 
 #[test]
 fn pull_gate_passes_for_every_listed_puller_key() {
-    // Both listed keys must pass the gate — this is the rotation-overlap
-    // property: during a rotation the old and new key are listed together.
+    // Both listed keys must pass the gate — the rotation-overlap property:
+    // during a rotation the old and new key are listed together.
     for i in 0..2 {
         let mut env = setup();
         let puller = env.pullers[i].insecure_clone();
@@ -188,9 +316,9 @@ fn delegate_pda_is_stable_and_program_derived() {
     let env = setup();
 
     // The delegatee registered on every delegation. Depends only on the
-    // program ID — no authority key, no state — so program upgrades (kill,
-    // rotation) can never move it.
-    let (delegate, _bump) = Pubkey::find_program_address(&[b"mesh_delegate"], &env.program_id);
+    // program ID — no authority key, no state — so neither upgrades nor
+    // config updates (kill, rotation) can ever move it.
+    let (delegate, _bump) = Pubkey::find_program_address(&[DELEGATE_SEED], &env.program_id);
     assert_eq!(delegate, env.delegate);
     for puller in &env.pullers {
         assert_ne!(delegate, puller.pubkey());
@@ -467,6 +595,7 @@ fn pull_moves_funds_end_to_end_via_native_program() {
         delegate: env.delegate,
         puller_key: puller.pubkey(),
         subscriptions_program: SUBSCRIPTIONS_PROGRAM,
+        config: env.config,
     }
     .to_account_metas(None);
     metas.extend(native::pull_payment_metas(

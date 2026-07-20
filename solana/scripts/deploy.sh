@@ -30,7 +30,7 @@ grep -q '^PULLER_KEYS=' "$ENV_FILE" || {
   exit 1
 }
 if [[ -z "$(grep '^PULLER_KEYS=' "$ENV_FILE" | cut -d= -f2- | tr -d '"[:space:]')" ]]; then
-  echo "⚠️  PULLER_KEYS is EMPTY — this deploys the KILL-SWITCH build: no key can pull." >&2
+  echo "⚠️  PULLER_KEYS is EMPTY — the on-chain config will be set to EMPTY (kill switch): no key can pull." >&2
 fi
 
 # No program keypair is ever stored. Three cases:
@@ -104,6 +104,15 @@ solana program deploy "$ARTIFACT" \
 
 echo
 solana program show "$PROGRAM_ID" --url "$URL"
+
+# Sync the env's PULLER_KEYS into the on-chain config (initializes it on the
+# first deploy; later key changes don't need a deploy at all — use
+# scripts/set-puller-keys.sh).
+KEYS=$(grep '^PULLER_KEYS=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')
+echo
+echo "Syncing puller keys to the on-chain config..."
+# shellcheck disable=SC2086 — KEYS is intentionally word-split
+cargo run -q -p admin-cli -- "$PROGRAM_ID" "$WALLET" "https://api.mainnet-beta.solana.com" $KEYS
 
 PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID")
 if $MINTED; then
