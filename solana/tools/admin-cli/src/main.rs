@@ -8,7 +8,8 @@
 //!   admin-cli <program-id> <signer> <rpc-url> upgrade <buffer-address>
 //!   admin-cli <program-id> <signer> <rpc-url> show
 //!   admin-cli <program-id> <signer> <rpc-url> transfer <to> <lamports>
-//!   admin-cli <program-id> <signer> <rpc-url> close    <recipient>
+//!   admin-cli <program-id> <signer> <rpc-url> close    <recipient>   (loader: undeploy program)
+//!   admin-cli <program-id> <signer> <rpc-url> close-config           (reclaim config rent)
 //!
 //! <signer> selects the mode:
 //!   a keypair file path — sign with it and send directly;
@@ -229,6 +230,19 @@ fn main() {
                 subscription_controller::accounts::AcceptAdmin {
                     config,
                     new_admin: admin_pubkey,
+                }
+                .to_account_metas(None),
+            )
+        }
+        "close-config" => {
+            // Reclaim the config account's rent → admin. Signed by the admin.
+            println!("close_config (reclaim rent) — admin {admin_pubkey}");
+            Instruction::new_with_bytes(
+                program_id,
+                &subscription_controller::instruction::CloseConfig {}.data(),
+                subscription_controller::accounts::CloseConfig {
+                    config,
+                    admin: admin_pubkey,
                 }
                 .to_account_metas(None),
             )

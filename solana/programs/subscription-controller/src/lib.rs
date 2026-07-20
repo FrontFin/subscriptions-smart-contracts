@@ -97,6 +97,21 @@ pub struct AcceptAdmin<'info> {
     pub new_admin: Signer<'info>,
 }
 
+/// Reclaim the config account's rent (teardown). Admin-gated; refund → admin.
+#[derive(Accounts)]
+pub struct CloseConfig<'info> {
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump,
+        has_one = admin @ ControllerError::Unauthorized,
+        close = admin,
+    )]
+    pub config: Account<'info, Config>,
+
+    pub admin: Signer<'info>,
+}
+
 /// Trigger one recurring-delegation pull.
 ///
 /// The program is a *verified signer proxy*: it checks the gate (signer is in
@@ -174,6 +189,14 @@ pub mod subscription_controller {
         let config = &mut ctx.accounts.config;
         config.admin = ctx.accounts.new_admin.key();
         config.pending_admin = Pubkey::default();
+        Ok(())
+    }
+
+    /// Admin: close the config account and reclaim its rent (teardown only —
+    /// afterwards `pull` fails until a new config is initialized). Do this
+    /// while the program is still live; closing the program first orphans the
+    /// config's rent.
+    pub fn close_config(_ctx: Context<CloseConfig>) -> Result<()> {
         Ok(())
     }
 

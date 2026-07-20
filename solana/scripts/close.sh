@@ -29,6 +29,34 @@ echo "This permanently burns the program id (it can never be redeployed)."
 read -rp "Type 'close' to proceed: " CONFIRM
 [[ "$CONFIRM" == "close" ]] || { echo "aborted"; exit 1; }
 
+# First reclaim the config account's rent, while the program is still live
+# (closing the program first would orphan it). Signed by the CURRENT on-chain
+# admin — which may differ from the upgrade authority after a handover.
+CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null \
+  | awk '$1=="admin"{print $3}')
+if [[ -n "$CONFIG_ADMIN" ]]; then
+  CB64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$CONFIG_ADMIN" "$RPC_URL" close-config \
+        | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
+  # Simulate first: skip gracefully (no scary popup) if the deployed program
+  # predates `close_config`, or the config is already gone.
+  SIM_ERR=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"simulateTransaction\",\"params\":[\"$CB64\",{\"sigVerify\":false,\"replaceRecentBlockhash\":true,\"encoding\":\"base64\"}]}" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['value']['err'])" 2>/dev/null)
+  if [[ "$SIM_ERR" == "None" ]]; then
+    echo "reclaiming config rent (admin $CONFIG_ADMIN)..."
+    if CSIG=$(python3 scripts/sign_in_browser.py "$CB64" "$CONFIG_ADMIN"); then
+      echo "config closed: $CSIG"
+      solana confirm "$CSIG" --url "$URL" >/dev/null 2>&1 || true
+    else
+      echo "⚠️  config close not signed — its rent (~0.0035 SOL) will be orphaned." >&2
+    fi
+  else
+    echo "config-rent reclaim unavailable (deployed program has no close_config, or config already gone) — skipping; ~0.0035 SOL orphaned."
+  fi
+else
+  echo "no config found on-chain — skipping config-rent reclaim."
+fi
+
 while true; do
   B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" close "$RECIPIENT" \
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')

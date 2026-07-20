@@ -63,14 +63,19 @@ PROGRAM_ID=$(solana-keygen pubkey "$PROGRAM_KP")
 scripts/build.sh "$ENV" "$PROGRAM_ID"
 ARTIFACT="target/deploy-$ENV/subscription_controller.so"
 SIZE=$(stat -f%z "$ARTIFACT" 2>/dev/null || stat -c%s "$ARTIFACT")
-# Working capital: program rent (locked in ProgramData; refunded on close)
-# plus fee/margin headroom. Leftovers sweep back to the wallet.
-FUND_LAMPORTS=$(python3 -c "print(($SIZE + 200) * 6960 + 30_000_000)")
+# Allocate 20% headroom so later code upgrades fit without a separate
+# `solana program extend` (which needs the upgrade authority to sign — an
+# extra step the browser-signed flow doesn't do). Extra rent is refunded on
+# close.
+MAX_LEN=$(python3 -c "print(int($SIZE * 12 // 10))")
+# Working capital: program rent for the full allocation (locked in
+# ProgramData; refunded on close) plus fee headroom. Leftovers sweep back.
+FUND_LAMPORTS=$(python3 -c "print(($MAX_LEN + 200) * 6960 + 30_000_000)")
 
 echo "environment       : $ENV (FIRST deploy, browser-signed — two wallet popups)"
 echo "authority wallet  : $UPGRADE_AUTHORITY (funds the deploy; becomes upgrade authority + config admin)"
 echo "program id        : $PROGRAM_ID (minted now, permanent)"
-echo "artifact          : $ARTIFACT ($SIZE bytes)"
+echo "artifact          : $ARTIFACT ($SIZE bytes; allocated $MAX_LEN with 20% headroom)"
 echo "sha256            : $(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
 echo "puller keys       : ${KEYS:-<EMPTY — kill switch>}"
 echo "working capital   : ~$(python3 -c "print(f'{$FUND_LAMPORTS/1e9:.3f}')") SOL from the wallet (rent deposit stays with the program; the rest sweeps back)"
@@ -84,7 +89,7 @@ ephemeral_payer "$UPGRADE_AUTHORITY" "$FUND_LAMPORTS" "$RPC_URL"
 solana program deploy "$ARTIFACT" \
   --program-id "$PROGRAM_KP" \
   --keypair "$PAYER_FILE" \
-  --max-len "$SIZE" \
+  --max-len "$MAX_LEN" \
   --url "$URL"
 
 # Hand the upgrade authority to the wallet (signed by the temporary payer,

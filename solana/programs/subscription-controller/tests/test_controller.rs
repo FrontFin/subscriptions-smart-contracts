@@ -362,6 +362,39 @@ fn admin_handover_is_two_step() {
 }
 
 #[test]
+fn close_config_reclaims_and_requires_admin() {
+    let mut env = setup();
+    let admin = env.admin.insecure_clone();
+    let outsider = Keypair::new();
+    env.svm.airdrop(&outsider.pubkey(), 1_000_000_000).unwrap();
+
+    fn close_ix(env: &Env, signer: Pubkey) -> Instruction {
+        Instruction::new_with_bytes(
+            env.program_id,
+            &subscription_controller::instruction::CloseConfig {}.data(),
+            subscription_controller::accounts::CloseConfig {
+                config: env.config,
+                admin: signer,
+            }
+            .to_account_metas(None),
+        )
+    }
+
+    // Non-admin cannot close.
+    let ix = close_ix(&env, outsider.pubkey());
+    send(&mut env, ix, &outsider, &[&outsider]).expect_err("only admin closes the config");
+
+    // Admin closes; the config account is gone (rent refunded to admin).
+    let ix = close_ix(&env, admin.pubkey());
+    send(&mut env, ix, &admin, &[&admin]).expect("admin closes config");
+    assert!(env
+        .svm
+        .get_account(&env.config)
+        .map(|a| a.data.is_empty())
+        .unwrap_or(true));
+}
+
+#[test]
 fn pull_rejects_non_pull_payment_instruction() {
     let mut env = setup();
     let puller = env.pullers[0].insecure_clone();

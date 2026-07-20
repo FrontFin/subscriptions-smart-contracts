@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Apply the env's PULLER_KEYS to the program's ON-CHAIN config — a single
-# data transaction signed by the admin (the UPGRADE_AUTHORITY wallet). No
-# build, no deploy: the audited program code is untouched. Initializes the
-# config automatically on first use.
+# data transaction signed by the CONFIG ADMIN. The admin is read live from the
+# on-chain config (not assumed to be UPGRADE_AUTHORITY — after a handover they
+# can differ), so this always prompts for whoever actually controls the
+# config. No build, no deploy: the audited program code is untouched. If the
+# config doesn't exist yet, it initializes as the upgrade authority.
 #
 # Signing (2nd arg):
 #   (default)  browser wallet popup via the localhost bridge — the key never
@@ -33,8 +35,16 @@ grep -q '^PULLER_KEYS=' "$ENV_FILE" || {
 }
 KEYS=$(grep '^PULLER_KEYS=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')
 
+# The signer must be the CURRENT config admin. Read it live from chain; if the
+# config isn't initialized yet, fall back to the upgrade authority (the
+# gated `initialize` path).
+SIGNER=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show 2>/dev/null \
+  | awk '$1=="admin"{print $3}')
+[[ -n "$SIGNER" ]] || SIGNER="$UPGRADE_AUTHORITY"
+
 echo "environment : $ENV"
 echo "program id  : $PROGRAM_ID"
+echo "signed by   : $SIGNER (current config admin)"
 if [[ -z "${KEYS// /}" ]]; then
   echo "puller keys : <EMPTY — ⚠️  KILL SWITCH: no key will be able to pull>"
 else
@@ -54,7 +64,7 @@ fi
 
 # Legacy paste mode.
 if [[ "$MODE" == "--paste" ]]; then
-  prompt_wallet "$UPGRADE_AUTHORITY"
+  prompt_wallet "$SIGNER"
   read -rp "Apply to the on-chain config on MAINNET? Type 'apply' to proceed: " CONFIRM
   [[ "$CONFIRM" == "apply" ]] || { echo "aborted"; exit 1; }
   # shellcheck disable=SC2086 — KEYS is intentionally word-split
@@ -66,13 +76,13 @@ fi
 # transaction and IS the confirmation step.
 while true; do
   # shellcheck disable=SC2086 — KEYS is intentionally word-split
-  B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" keys $KEYS \
+  B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" keys $KEYS \
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
   [[ -n "$B64" ]] || { echo "error: could not build the transaction" >&2; exit 1; }
-  if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$UPGRADE_AUTHORITY"); then
+  if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$SIGNER"); then
     echo "signature: $SIG"
     solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1 || sleep 2
-    cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show || true
+    cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show || true
     exit 0
   fi
   echo

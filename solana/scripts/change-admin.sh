@@ -27,7 +27,12 @@ RPC_URL="https://api.mainnet-beta.solana.com"
 
 case "$STEP" in
   propose)
-    SIGNER=$(env_upgrade_authority "$ENV")   # the current admin
+    # The current admin signs propose — read it live from chain (it may differ
+    # from UPGRADE_AUTHORITY after a prior handover), falling back to the
+    # upgrade authority if the config isn't initialized yet.
+    SIGNER=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$(env_upgrade_authority "$ENV")" "$RPC_URL" show 2>/dev/null \
+      | awk '$1=="admin"{print $3}')
+    [[ -n "$SIGNER" ]] || SIGNER=$(env_upgrade_authority "$ENV")
     ARGS=(propose-admin "$NEW_ADMIN")
     echo "propose: current admin $SIGNER → pending admin $NEW_ADMIN" ;;
   accept)
