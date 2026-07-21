@@ -1,5 +1,9 @@
 # Mesh Subscription Controller (Anchor program)
 
+## Build & run
+
+Deployment and all operations: **[DEPLOY.md](DEPLOY.md)**.
+
 ## What it does
 
 A stateless **signer proxy** that sits between the Mesh puller and Solana's native Subscriptions program.
@@ -53,9 +57,3 @@ Both are single admin transactions. And because `MeshDelegate` is derived from t
 | `close_config`                   | admin                    | Close the config, reclaim its rent (teardown).                       |
 | `pull(native_data)`              | puller                   | Gate + forward the native `pull_payment`, signing as `MeshDelegate`. |
 
-
-
-
-## Build & run
-
-Deployment and all operations: **[DEPLOY.md](DEPLOY.md)**.
