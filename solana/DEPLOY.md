@@ -1,7 +1,7 @@
 # Deploying the Mesh Subscription Controller
 
 Steps first, background last. The why is in the
-[TDD](../docs/solana-pull-payment-pda-tdd.md).
+[TDD](../docs/solana-subscription-controller-tdd.md).
 
 > **Mainnet-only, money-moving.** Every signature is a popup in your browser
 > wallet (Phantom / Solflare / Backpack) via a localhost bridge — no private
