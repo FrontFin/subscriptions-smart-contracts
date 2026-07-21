@@ -11,7 +11,7 @@ The controller holds no funds and enforces no financial rules. The native progra
 ```mermaid
 flowchart LR
     Admin["Admin wallet"] -. "set_puller_keys<br/>(rotate / kill switch)" .-> Cfg[("Config PDA<br/>puller_keys allow-list")]
-    Puller["Mesh puller<br/>(holds a hot key in )"] -- "pull(native_data)<br/>signed by hot key" --> Ctrl
+    Puller["Mesh puller<br/>(hot key in KeyVault)"] -- "pull(native_data)<br/>signed by hot key" --> Ctrl
     subgraph Controller["Subscription Controller — this program"]
       Ctrl{"gate:<br/>1 · signer in puller_keys<br/>2 · target = native program<br/>3 · ix = pull_payment"}
     end
