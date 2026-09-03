@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One-time migration of an env's TWO authorities to a Squads vault:
 #   1. the program's upgrade authority  (solana program set-upgrade-authority)
-#   2. the config admin                 (controller set_admin instruction)
+#   2. the config admin                 (controller propose_admin, then the
+#      vault executes accept_admin — the handover is two-step)
 # Signed by the CURRENT authority wallet (key pasted at the prompt — the last
 # time it is ever needed). Afterwards: upgrades via scripts/stage-upgrade.sh,
 # key changes via scripts/set-puller-keys.sh <env> --print — both approved in
@@ -25,10 +26,13 @@ echo "program id        : $PROGRAM_ID"
 echo "current authority : $CURRENT (its key is prompted below, one last time)"
 echo "new authority     : $VAULT (Squads vault)"
 echo
-echo "⚠️  ONE-WAY for this wallet: after this, only the Squad can upgrade the"
-echo "   program or change puller keys. Triple-check the vault address."
+echo "⚠️  ONE-WAY for the UPGRADE AUTHORITY: after step 1 only the Squad can"
+echo "   upgrade the program, and it cannot be undone from this wallet."
+echo "   The CONFIG ADMIN does not move until the vault executes accept-admin"
+echo "   (step 2 below) — until then this wallet still changes puller keys."
+echo "   Triple-check the vault address."
 read -rp "Type the LAST 4 characters of the vault address to confirm: " TAIL
-[[ "$VAULT" == *"$TAIL" && -n "$TAIL" ]] || { echo "aborted (mismatch)"; exit 1; }
+[[ "$TAIL" == "${VAULT: -4}" ]] || { echo "aborted (mismatch)"; exit 1; }
 
 prompt_wallet "$CURRENT"
 

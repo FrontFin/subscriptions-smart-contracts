@@ -100,6 +100,21 @@ solana program set-upgrade-authority "$PROGRAM_ID" \
   --skip-new-upgrade-authority-signer-check \
   --url "$URL"
 
+# Pin the id BEFORE anything that can abort. The program keypair is discarded
+# on exit, so an id that exists on-chain but not in the env file is unreachable.
+PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID")
+{
+  echo "PROGRAM_ID=$PROGRAM_ID"
+  echo "# ^ the smart contract address. Set BOTH backend settings to it (same value):"
+  echo "#   SolanaSubscriptionConfig--SmartContractAddress        (Core API app)"
+  echo "#   SolanaSubscriptionPullerConfig--SmartContractAddress  (Backend Functions app)"
+  echo "# The backend derives the MeshDelegate PDA from it by itself — not a config"
+  echo "# value. Informational, for cross-checking the backend's derivation; this PDA"
+  echo "# becomes the 'delegatee' recorded on each subscription (DB row + on-chain):"
+  echo "# MeshDelegate PDA = $PDA"
+} >> "$ENV_FILE"
+echo "pinned PROGRAM_ID=$PROGRAM_ID into $ENV_FILE (the throwaway program key is discarded on exit)"
+
 # Popup 2 — the wallet initializes the on-chain Config (becomes admin).
 INITIALIZED=false
 while true; do
@@ -117,33 +132,25 @@ while true; do
 done
 $INITIALIZED || echo "⚠️  Config NOT initialized — pulls will fail until you run: scripts/set-puller-keys.sh $ENV" >&2
 
-# Front-run guard: `initialize` is permissionless, so confirm WE own the
-# resulting config. If someone front-ran init, they'd be admin instead —
-# abort loudly rather than let you wire a backend to a config you don't
-# control (griefing, not theft: no delegations exist here yet).
+# Ownership check: `initialize` is gated to the program's upgrade authority,
+# so a front-run needs that key — but confirm WE own the resulting config
+# anyway rather than let you wire a backend to a config you don't control.
 if $INITIALIZED; then
-  ON_CHAIN_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show 2>/dev/null \
+  ON_CHAIN_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show \
     | awk '$1=="admin"{print $3}')
-  if [[ "$ON_CHAIN_ADMIN" != "$UPGRADE_AUTHORITY" ]]; then
-    echo "🛑 config admin is $ON_CHAIN_ADMIN, expected $UPGRADE_AUTHORITY — initialize was likely front-run." >&2
+  if [[ -z "$ON_CHAIN_ADMIN" ]]; then
+    echo "⚠️  could not read the config admin back — the RPC returned nothing." >&2
+    echo "   PROGRAM_ID is already pinned in $ENV_FILE; verify before wiring the backend:" >&2
+    echo "   cargo run -p admin-cli -- $PROGRAM_ID tx:$UPGRADE_AUTHORITY $RPC_URL show" >&2
+  elif [[ "$ON_CHAIN_ADMIN" != "$UPGRADE_AUTHORITY" ]]; then
+    echo "🛑 config admin is $ON_CHAIN_ADMIN, expected $UPGRADE_AUTHORITY — initialize was front-run." >&2
     echo "   Do NOT wire the backend to $PROGRAM_ID. Close it (scripts/close.sh $ENV) and redeploy for a fresh id." >&2
     exit 1
+  else
+    echo "verified: config admin = $UPGRADE_AUTHORITY"
   fi
-  echo "verified: config admin = $UPGRADE_AUTHORITY"
 fi
 
-PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID")
-{
-  echo "PROGRAM_ID=$PROGRAM_ID"
-  echo "# ^ the smart contract address. Set BOTH backend settings to it (same value):"
-  echo "#   SolanaSubscriptionConfig--SmartContractAddress        (Core API app)"
-  echo "#   SolanaSubscriptionPullerConfig--SmartContractAddress  (Backend Functions app)"
-  echo "# The backend derives the MeshDelegate PDA from it by itself — not a config"
-  echo "# value. Informational, for cross-checking the backend's derivation; this PDA"
-  echo "# becomes the 'delegatee' recorded on each subscription (DB row + on-chain):"
-  echo "# MeshDelegate PDA = $PDA"
-} >> "$ENV_FILE"
-echo "pinned PROGRAM_ID=$PROGRAM_ID into $ENV_FILE (the throwaway program key is discarded on exit)"
 echo
 echo "Backend configuration for '$ENV':"
 echo "  Smart contract address (program id) : $PROGRAM_ID"

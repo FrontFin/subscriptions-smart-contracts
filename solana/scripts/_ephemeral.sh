@@ -19,7 +19,14 @@ _eph_cleanup() {
     bal=$(solana balance -k "$EPHEMERAL" -u "$_EPH_URL" 2>/dev/null | awk '{print $1}')
     if [[ -n "$bal" && "$bal" != "0" ]]; then
       echo "sweeping $bal SOL from the temporary payer back to $_EPH_SWEEP_TO..." >&2
-      solana transfer "$_EPH_SWEEP_TO" ALL --keypair "$EPHEMERAL" --url "$_EPH_URL" >/dev/null 2>&1 || true
+      if ! solana transfer "$_EPH_SWEEP_TO" ALL --keypair "$EPHEMERAL" --url "$_EPH_URL" >/dev/null 2>&1; then
+        local rescue="${TMPDIR:-/tmp}/mesh-unswept-payer-$(solana-keygen pubkey "$EPHEMERAL").json"
+        cp "$EPHEMERAL" "$rescue" && chmod 600 "$rescue"
+        echo "⚠️  SWEEP FAILED — $bal SOL is still on the temporary payer." >&2
+        echo "   Its key is kept at: $rescue" >&2
+        echo "   Recover with: solana transfer $_EPH_SWEEP_TO ALL --keypair $rescue --url $_EPH_URL" >&2
+        echo "   DELETE that file once the funds are back." >&2
+      fi
     fi
   fi
   _secrets_cleanup

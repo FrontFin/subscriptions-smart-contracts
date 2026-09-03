@@ -395,6 +395,45 @@ fn close_config_reclaims_and_requires_admin() {
 }
 
 #[test]
+fn close_config_works_when_the_admin_is_not_the_fee_payer() {
+    // A Squads vault admin never pays the fee. Without `mut` on
+    // `CloseConfig.admin` the generated meta is read-only, the rent transfer is
+    // a readonly lamport change, and the runtime rejects it — invisible in
+    // every test where the admin happens to be the fee payer.
+    let mut env = setup();
+    let admin = env.admin.insecure_clone();
+    let payer = Keypair::new();
+    env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+
+    let admin_before = env.svm.get_account(&admin.pubkey()).map(|a| a.lamports).unwrap_or(0);
+    let rent = env.svm.get_account(&env.config).expect("config exists").lamports;
+
+    let ix = Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::CloseConfig {}.data(),
+        subscription_controller::accounts::CloseConfig {
+            config: env.config,
+            admin: admin.pubkey(),
+        }
+        .to_account_metas(None),
+    );
+    send(&mut env, ix, &payer, &[&payer, &admin])
+        .expect("close_config must work when the admin only signs");
+
+    assert!(env
+        .svm
+        .get_account(&env.config)
+        .map(|a| a.data.is_empty())
+        .unwrap_or(true));
+    let admin_after = env.svm.get_account(&admin.pubkey()).map(|a| a.lamports).unwrap_or(0);
+    assert_eq!(
+        admin_after,
+        admin_before + rent,
+        "the config's rent must reach the admin, who paid no fee"
+    );
+}
+
+#[test]
 fn pull_rejects_non_pull_payment_instruction() {
     let mut env = setup();
     let puller = env.pullers[0].insecure_clone();

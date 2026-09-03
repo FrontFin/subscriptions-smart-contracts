@@ -101,8 +101,17 @@ fn num_bigint(bytes: &[u8]) -> Vec<u32> {
     n
 }
 
+/// `None` means the config account does not exist. An RPC read that fails
+/// aborts instead of reporting absence: callers turn absence into `Initialize`,
+/// so conflating the two would silently downgrade a kill switch to a no-op.
 fn fetch_config(client: &RpcClient, config: &Pubkey) -> Option<subscription_controller::Config> {
-    let account = client.get_account(config).ok()?;
+    let account = match client.get_account_with_commitment(config, client.commitment()) {
+        Ok(response) => response.value?,
+        Err(err) => {
+            eprintln!("error: cannot read config {config} over RPC: {err}");
+            std::process::exit(1);
+        }
+    };
     subscription_controller::Config::try_deserialize(&mut account.data.as_slice()).ok()
 }
 
@@ -174,7 +183,7 @@ fn main() {
                 .iter()
                 .map(|k| Pubkey::from_str(k).expect("invalid puller key"))
                 .collect();
-            if !print_only && client.get_account(&config).is_err() {
+            if !print_only && fetch_config(&client, &config).is_none() {
                 println!("config {config} not found — initializing (admin = {admin_pubkey})");
                 // ProgramData PDA under the BPF upgradeable loader; the program
                 // enforces its upgrade authority == admin.

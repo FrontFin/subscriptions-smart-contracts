@@ -35,6 +35,10 @@ grep -q '^PULLER_KEYS=' "$ENV_FILE" || {
 }
 KEYS=$(grep '^PULLER_KEYS=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')
 
+# Whitespace-separated pubkeys on stdin -> one sorted, space-joined line, so
+# the wanted list and the on-chain list compare regardless of order.
+normalize_keys() { tr -s ' \t\n' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//'; }
+
 # The signer must be the CURRENT config admin. Read it live from chain; if the
 # config isn't initialized yet, fall back to the upgrade authority (the
 # gated `initialize` path).
@@ -82,7 +86,17 @@ while true; do
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$SIGNER"); then
     echo "signature: $SIG"
     solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1 || sleep 2
-    cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show || true
+    ON_CHAIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show | tee /dev/stderr \
+      | awk '$1=="puller"&&$2=="key"{print $4}' | normalize_keys)
+    WANTED=$(printf '%s' "$KEYS" | normalize_keys)
+    if [[ "$ON_CHAIN" != "$WANTED" ]]; then
+      echo "🛑 on-chain puller keys are [$ON_CHAIN], expected [$WANTED] — the change did NOT land." >&2
+      if [[ -z "$WANTED" ]]; then
+        echo "   THE KILL SWITCH IS NOT ENGAGED. Re-run this script." >&2
+      fi
+      exit 1
+    fi
+    echo "verified on-chain: puller keys = [${ON_CHAIN:-EMPTY — kill switch engaged}]"
     exit 0
   fi
   echo

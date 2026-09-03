@@ -109,6 +109,9 @@ pub struct CloseConfig<'info> {
     )]
     pub config: Account<'info, Config>,
 
+    /// Receives the config's rent, so it must be writable even when it is not
+    /// the fee payer (a Squads vault admin never is).
+    #[account(mut)]
     pub admin: Signer<'info>,
 }
 

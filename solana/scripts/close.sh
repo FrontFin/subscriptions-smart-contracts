@@ -71,7 +71,8 @@ while true; do
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || { echo "aborted"; exit 1; }
 done
 
-sed -i '' \
+SCRUBBED=$(mktemp)
+sed \
   -e '/^PROGRAM_ID=/d' \
   -e '/^# \^ the smart contract address/d' \
   -e '/^#   SolanaSubscription.*SmartContractAddress/d' \
@@ -79,6 +80,8 @@ sed -i '' \
   -e '/^# value\. Informational, for cross-checking/d' \
   -e '/^# becomes the .delegatee. recorded/d' \
   -e '/^# MeshDelegate PDA = /d' \
-  "scripts/envs/$ENV.env"
+  "scripts/envs/$ENV.env" > "$SCRUBBED"
+cat "$SCRUBBED" > "scripts/envs/$ENV.env"
+rm -f "$SCRUBBED"
 echo "Done. Rent refunded to $RECIPIENT."
 echo "Unpinned the burned PROGRAM_ID from scripts/envs/$ENV.env — the next deploy mints a fresh id/PDA."
