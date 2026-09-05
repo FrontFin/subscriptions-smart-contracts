@@ -86,11 +86,19 @@ read -rp "Deploy '$ENV' to MAINNET now? Type 'deploy' to proceed: " CONFIRM
 # Popup 1 — the wallet funds the temporary payer.
 ephemeral_payer "$UPGRADE_AUTHORITY" "$FUND_LAMPORTS" "$RPC_URL"
 
-solana program deploy "$ARTIFACT" \
+if ! solana program deploy "$ARTIFACT" \
   --program-id "$PROGRAM_KP" \
   --keypair "$PAYER_FILE" \
   --max-len "$MAX_LEN" \
-  --url "$URL"
+  --url "$URL"; then
+  echo >&2
+  echo "🛑 deploy failed. Its write buffer (if any) belongs to the temporary payer" >&2
+  echo "   and is closed on exit, so that rent comes back to $UPGRADE_AUTHORITY." >&2
+  echo "   $ENV_FILE was NOT touched — re-running mints a fresh program id." >&2
+  echo "   If $PROGRAM_ID was already created on chain, its rent stays there: the" >&2
+  echo "   program key and the temporary payer are both discarded on exit." >&2
+  exit 1
+fi
 
 # Hand the upgrade authority to the wallet (signed by the temporary payer,
 # which held it for the seconds since the deploy).

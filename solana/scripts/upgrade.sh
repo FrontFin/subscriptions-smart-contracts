@@ -15,6 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/_ephemeral.sh
 source scripts/_env.sh
+source scripts/_buffers.sh
 
 ENV="${1:?usage: scripts/upgrade.sh <local|dev|prod>}"
 [[ "$ENV" != "test" ]] || { echo "error: 'test' is the LiteSVM fixture — never deployable" >&2; exit 1; }
@@ -48,6 +49,7 @@ if (( GROW > 0 )); then
   echo "allocation        : binary grew ($CURRENT_LEN → $SIZE bytes) — will extend by $GROW bytes first"
 fi
 echo "working capital   : ~$(python3 -c "print(f'{$FUND_LAMPORTS/1e9:.3f}')") SOL from the wallet (buffer rent comes back to it when the upgrade lands)"
+report_stray_buffers "$AUTHORITY" "$URL" "scripts/buffers.sh $ENV --close"
 echo
 read -rp "Stage this upgrade on MAINNET? Type 'upgrade' to proceed: " CONFIRM
 [[ "$CONFIRM" == "upgrade" ]] || { echo "aborted"; exit 1; }
@@ -74,6 +76,7 @@ while true; do
     solana confirm "$SIG" --url "$URL" || true
     solana program show "$PROGRAM_ID" --url "$URL"
     echo "buffer rent was refunded to $AUTHORITY (the spill account)."
+    report_stray_buffers "$AUTHORITY" "$URL" "scripts/buffers.sh $ENV --close"
     exit 0
   fi
   echo
@@ -82,6 +85,7 @@ while true; do
 done
 
 echo "Upgrade not executed. The staged buffer $BUFFER still exists (authority: $AUTHORITY)." >&2
-echo "Re-running this script stages a NEW buffer; reclaim the old one's rent later with:" >&2
-echo "  solana program close $BUFFER --recipient <address>   (signed by the authority)" >&2
+echo "Re-running this script stages a NEW buffer; close the old one with:" >&2
+echo "  scripts/buffers.sh $ENV --close $BUFFER" >&2
+report_stray_buffers "$AUTHORITY" "$URL" "scripts/buffers.sh $ENV --close"
 exit 1

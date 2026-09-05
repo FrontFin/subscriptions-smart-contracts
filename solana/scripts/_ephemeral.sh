@@ -3,11 +3,13 @@
 #   1. mint a throwaway keypair (temp file, auto-removed on exit);
 #   2. one browser popup: the wallet funds it with the needed working capital;
 #   3. the throwaway does the mechanical signing (buffer writes etc.);
-#   4. on exit — success, error, or Ctrl-C — every leftover lamport is swept
-#      back to the wallet automatically.
+#   4. on exit — success, error, or Ctrl-C — any write buffer the run left
+#      behind is closed and every leftover lamport is swept back to the
+#      wallet automatically.
 # Override: set FEE_PAYER=<keypair path> to use a standing hot key instead
 # (skips the funding popup and the sweep).
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_secrets.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_buffers.sh"
 
 EPHEMERAL=""
 _EPH_SWEEP_TO=""
@@ -15,6 +17,21 @@ _EPH_URL="mainnet-beta"
 
 _eph_cleanup() {
   if [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" && -n "$_EPH_SWEEP_TO" ]]; then
+    # A half-finished run leaves its write buffer owned by this throwaway key,
+    # which is deleted below — close it now or that rent is stranded for good.
+    local eph_pub strays
+    eph_pub=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || eph_pub=""
+    if [[ -n "$eph_pub" ]]; then
+      strays=$(list_buffers "$eph_pub" "$_EPH_URL") || strays=""
+      [[ -z "$strays" ]] || echo "closing the write buffer this run left behind (rent → $_EPH_SWEEP_TO)..." >&2
+      if ! solana program close --buffers -k "$EPHEMERAL" --authority "$EPHEMERAL" --recipient "$_EPH_SWEEP_TO" --url "$_EPH_URL" >/dev/null 2>&1; then
+        [[ -z "$strays" ]] || {
+          echo "⚠️  could not close it — its authority key is deleted on exit, so this rent is lost:" >&2
+          echo "$strays" >&2
+        }
+      fi
+    fi
+
     local bal
     bal=$(solana balance -k "$EPHEMERAL" -u "$_EPH_URL" 2>/dev/null | awk '{print $1}')
     if [[ -n "$bal" && "$bal" != "0" ]]; then
