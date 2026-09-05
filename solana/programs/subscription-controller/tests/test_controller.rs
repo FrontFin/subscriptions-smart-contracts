@@ -434,6 +434,48 @@ fn close_config_works_when_the_admin_is_not_the_fee_payer() {
 }
 
 #[test]
+fn close_config_is_blocked_while_a_handover_is_pending() {
+    let mut env = setup();
+    let admin = env.admin.insecure_clone();
+    let new_admin = Keypair::new();
+    env.svm.airdrop(&new_admin.pubkey(), 1_000_000_000).unwrap();
+
+    fn close_ix(env: &Env, signer: Pubkey) -> Instruction {
+        Instruction::new_with_bytes(
+            env.program_id,
+            &subscription_controller::instruction::CloseConfig {}.data(),
+            subscription_controller::accounts::CloseConfig {
+                config: env.config,
+                admin: signer,
+            }
+            .to_account_metas(None),
+        )
+    }
+
+    let ix = propose_admin_ix(&env, admin.pubkey(), new_admin.pubkey());
+    send(&mut env, ix, &admin, &[&admin]).expect("admin proposes handover");
+
+    let err = send(&mut env, close_ix(&env, admin.pubkey()), &admin, &[&admin])
+        .expect_err("close must be refused while a handover is pending");
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains("HandoverPending"),
+        "expected HandoverPending, got:\n{logs}"
+    );
+    assert!(
+        env.svm
+            .get_account(&env.config)
+            .is_some_and(|a| !a.data.is_empty()),
+        "the config must survive the refused close"
+    );
+
+    let ix = propose_admin_ix(&env, admin.pubkey(), Pubkey::default());
+    send(&mut env, ix, &admin, &[&admin]).expect("admin cancels the handover");
+    send(&mut env, close_ix(&env, admin.pubkey()), &admin, &[&admin])
+        .expect("close succeeds once no handover is pending");
+}
+
+#[test]
 fn pull_rejects_non_pull_payment_instruction() {
     let mut env = setup();
     let puller = env.pullers[0].insecure_clone();
@@ -560,6 +602,45 @@ fn pull_requires_puller_key_signature() {
     let msg = Message::new_with_blockhash(&[ix], Some(&payer.pubkey()), &blockhash);
     let res = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&payer]);
     assert!(res.is_err(), "tx must be unsignable without the puller key");
+}
+
+#[test]
+fn pull_reads_a_config_whose_tail_is_not_zero() {
+    // Anchor never zeroes the tail it does not write, and `puller_keys` is a
+    // variable-length Vec in the middle of the struct, so shrinking the list
+    // leaves stale bytes behind. Deserialization must ignore them.
+    use solana_account::Account;
+
+    let mut env = setup();
+    let puller = env.pullers[0].insecure_clone();
+    env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+
+    let existing = env.svm.get_account(&env.config).expect("config exists");
+    let mut data = vec![0xABu8; existing.data.len()];
+    data[0..8].copy_from_slice(&existing.data[0..8]);
+    data[8..40].copy_from_slice(env.admin.pubkey().as_ref());
+    data[40..44].copy_from_slice(&1u32.to_le_bytes());
+    data[44..76].copy_from_slice(puller.pubkey().as_ref());
+    data[76..108].copy_from_slice(Pubkey::default().as_ref());
+    env.svm
+        .set_account(
+            env.config,
+            Account {
+                data,
+                ..existing.clone()
+            },
+        )
+        .unwrap();
+
+    let ix = pull_ix(&env, puller.pubkey(), SUBSCRIPTIONS_PROGRAM);
+    let err = send(&mut env, ix, &puller, &[&puller])
+        .expect_err("the native program is not loaded in this fixture");
+    let logs = err.meta.logs.join("\n");
+    assert!(!logs.is_empty(), "the pull must reach execution");
+    assert!(
+        !logs.contains("AccountDidNotDeserialize") && !logs.contains("Unauthorized"),
+        "a dirty tail must not affect Config deserialization:\n{logs}"
+    );
 }
 
 #[test]
@@ -877,11 +958,166 @@ fn pull_moves_funds_end_to_end_via_native_program() {
 
     // The native program still enforces its own cap through the proxy: a
     // second pull in the same period must fail (allowance exhausted).
+    // A byte-identical retry is rejected as AlreadyProcessed with empty logs,
+    // which would satisfy the assertions below without executing anything.
+    env.svm.expire_blockhash();
     let err = send(&mut env, ix, &puller, &[&puller])
         .expect_err("second pull in the same period must exceed the cap");
     let logs = err.meta.logs.join("\n");
     assert!(
+        !logs.is_empty(),
+        "the second pull must reach execution, not be rejected before it runs"
+    );
+    assert!(
         !logs.contains("Unauthorized") && !logs.contains("WrongTargetProgram"),
         "failure must come from the native program, not the gate:\n{logs}"
     );
+}
+
+/// Measures how the native program meters a period's allowance. HAL-008 claims
+/// a dust pull burns the whole period; if the counter is metered by amount it
+/// only consumes what it moved, and the finding has no impact.
+#[test]
+fn dust_pulls_consume_only_their_own_amount() {
+    use anchor_lang::solana_program::clock::Clock;
+    use solana_account::Account;
+
+    const DECIMALS: u8 = 6;
+    const FUNDED: u64 = 100_000_000;
+    const AMOUNT_PER_PERIOD: u64 = 50_000_000;
+    const DUST: u64 = 1;
+    const DUST_PULLS: u64 = 3;
+
+    let mut env = setup();
+    let native_binary = include_bytes!("fixtures/subscriptions_program.so");
+    env.svm
+        .add_program(SUBSCRIPTIONS_PROGRAM, native_binary)
+        .unwrap();
+
+    #[allow(deprecated)]
+    let mainnet_rent = anchor_lang::solana_program::rent::Rent {
+        lamports_per_byte_year: 3480,
+        exemption_threshold: 1.0,
+        burn_percent: 50,
+    };
+    env.svm.set_sysvar(&mainnet_rent);
+
+    let puller = env.pullers[0].insecure_clone();
+    let delegator = Keypair::new();
+    let delegator_key = delegator.pubkey();
+    let merchant = Pubkey::new_unique();
+    env.svm.airdrop(&puller.pubkey(), 10_000_000_000).unwrap();
+    env.svm.airdrop(&delegator_key, 10_000_000_000).unwrap();
+
+    let mint = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let token_owner = native::token_program();
+    let source_ata = native::ata(&delegator_key, &mint);
+    let dest_ata = native::ata(&merchant, &mint);
+    for (address, data) in [
+        (
+            mint,
+            native::mint_account_data(&mint_authority, FUNDED, DECIMALS),
+        ),
+        (
+            source_ata,
+            native::token_account_data(&mint, &delegator_key, FUNDED),
+        ),
+        (dest_ata, native::token_account_data(&mint, &merchant, 0)),
+    ] {
+        env.svm
+            .set_account(
+                address,
+                Account {
+                    lamports: 10_000_000,
+                    data,
+                    owner: token_owner,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    let init_ix = native::initialize_authority_ix(&delegator_key, &mint);
+    send(&mut env, init_ix, &delegator, &[&delegator]).expect("initialize_authority");
+
+    let authority = native::subscription_authority(&delegator_key, &mint);
+    let authority_account = env.svm.get_account(&authority).expect("authority created");
+    let init_id = i64::from_le_bytes(authority_account.data[98..106].try_into().unwrap());
+
+    let clock: Clock = env.svm.get_sysvar();
+    let nonce = 1u64;
+    let create_ix = native::create_delegation_ix(
+        &delegator_key,
+        &env.delegate,
+        &mint,
+        nonce,
+        AMOUNT_PER_PERIOD,
+        3600,
+        clock.unix_timestamp,
+        clock.unix_timestamp + 30 * 86_400,
+        init_id,
+    );
+    send(&mut env, create_ix, &delegator, &[&delegator]).expect("create_recurring_delegation");
+    let delegation =
+        native::recurring_delegation(&authority, &delegator_key, &env.delegate, nonce);
+
+    let program_id = env.program_id;
+    let mut metas = subscription_controller::accounts::Pull {
+        delegate: env.delegate,
+        puller_key: puller.pubkey(),
+        subscriptions_program: SUBSCRIPTIONS_PROGRAM,
+        config: env.config,
+    }
+    .to_account_metas(None);
+    metas.extend(native::pull_payment_metas(
+        &delegation,
+        &delegator_key,
+        &env.delegate,
+        &mint,
+        &merchant,
+    ));
+    let pull_of = |amount: u64| {
+        Instruction::new_with_bytes(
+            program_id,
+            &subscription_controller::instruction::Pull {
+                native_data: native::pull_payment_data(amount, &delegator_key, &mint),
+            }
+            .data(),
+            metas.clone(),
+        )
+    };
+
+    for _ in 0..DUST_PULLS {
+        env.svm.expire_blockhash();
+        send(&mut env, pull_of(DUST), &puller, &[&puller]).expect("a dust pull must succeed");
+    }
+
+    let destination = env.svm.get_account(&dest_ata).unwrap();
+    assert_eq!(
+        native::token_amount(&destination.data),
+        DUST * DUST_PULLS,
+        "each dust pull must move exactly its own amount"
+    );
+
+    let delegation_account = env.svm.get_account(&delegation).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(delegation_account.data[203..211].try_into().unwrap()),
+        DUST * DUST_PULLS,
+        "the period counter must meter by amount, not by pull count"
+    );
+
+    env.svm.expire_blockhash();
+    send(&mut env, pull_of(0), &puller, &[&puller])
+        .expect_err("the native program must reject a zero-amount pull");
+
+    env.svm.expire_blockhash();
+    send(
+        &mut env,
+        pull_of(AMOUNT_PER_PERIOD - DUST * DUST_PULLS),
+        &puller,
+        &[&puller],
+    )
+    .expect("dust must not burn the rest of the period's allowance");
 }

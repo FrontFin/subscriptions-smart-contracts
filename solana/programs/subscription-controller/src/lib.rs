@@ -105,6 +105,7 @@ pub struct CloseConfig<'info> {
         seeds = [CONFIG_SEED],
         bump,
         has_one = admin @ ControllerError::Unauthorized,
+        constraint = config.pending_admin == Pubkey::default() @ ControllerError::HandoverPending,
         close = admin,
     )]
     pub config: Account<'info, Config>,

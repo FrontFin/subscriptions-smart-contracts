@@ -13,4 +13,6 @@ pub enum ControllerError {
     TooManyPullerKeys,
     #[msg("Forwarded instruction is not the native recurring pull_payment")]
     UnexpectedNativeInstruction,
+    #[msg("Config cannot be closed while an admin handover is pending")]
+    HandoverPending,
 }
