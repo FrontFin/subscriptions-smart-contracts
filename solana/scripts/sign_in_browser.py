@@ -10,9 +10,12 @@ Prints the base58 transaction signature on success; exits non-zero otherwise.
 """
 import http.server
 import json
+import secrets
 import sys
 import time
 import webbrowser
+
+MAX_REPORT_BYTES = 64 * 1024
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Sign transaction</title>
@@ -43,7 +46,13 @@ function b58(bytes) {
 
 function status(msg) { document.getElementById('status').textContent = msg; }
 async function report(obj) {
-  try { await fetch('/done', { method: 'POST', body: JSON.stringify(obj) }); } catch (e) {}
+  try {
+    await fetch('__TOKEN_PATH__/done', {
+      method: 'POST',
+      headers: { 'X-Bridge-Token': '__TOKEN__' },
+      body: JSON.stringify(obj),
+    });
+  } catch (e) {}
 }
 
 const seen = new Set();
@@ -106,12 +115,30 @@ setTimeout(() => {
 def main() -> None:
     if len(sys.argv) != 3:
         sys.exit("usage: sign_in_browser.py <base64-unsigned-tx> <expected-signer-pubkey>")
-    page = PAGE.replace("__TX_B64__", sys.argv[1]).replace("__EXPECTED__", sys.argv[2])
+    # Anything on this machine can reach a localhost port, and a page in the
+    # browser can POST to one cross-origin. The unguessable path keeps the
+    # unsigned transaction from being read, and the custom header forces a
+    # CORS preflight that is never answered, so only our own page can report.
+    token = secrets.token_urlsafe(24)
+    token_path = f"/{token}"
+    token_bytes = token.encode()
+    done_path = f"{token_path}/done"
+    allowed_origins = set()
+    page = (
+        PAGE.replace("__TX_B64__", sys.argv[1])
+        .replace("__EXPECTED__", sys.argv[2])
+        .replace("__TOKEN_PATH__", token_path)
+        .replace("__TOKEN__", token)
+    )
     result = {}
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        # Without this the base class leaves the socket blocking, so one idle
+        # connection holds the single-threaded server past its own deadline.
+        timeout = 10
+
         def do_GET(self):
-            if self.path == "/":
+            if self.path == token_path:
                 body = page.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -123,7 +150,27 @@ def main() -> None:
                 self.end_headers()
 
         def do_POST(self):
-            n = int(self.headers.get("Content-Length", 0))
+            origin = self.headers.get("Origin")
+            authorized = (
+                self.path == done_path
+                and secrets.compare_digest(
+                    self.headers.get("X-Bridge-Token", "").encode("utf-8", "replace"),
+                    token_bytes,
+                )
+                and (origin is None or origin in allowed_origins)
+            )
+            if not authorized:
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                n = -1
+            if not 0 <= n <= MAX_REPORT_BYTES:
+                self.send_response(413)
+                self.end_headers()
+                return
             try:
                 result.update(json.loads(self.rfile.read(n) or b"{}"))
             except Exception:
@@ -135,7 +182,9 @@ def main() -> None:
             pass
 
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    port = server.server_address[1]
+    allowed_origins.update({f"http://127.0.0.1:{port}", f"http://localhost:{port}"})
+    url = f"http://127.0.0.1:{port}{token_path}"
     print(f"sign in your browser: {url}  (waiting up to 180s)", file=sys.stderr)
     webbrowser.open(url)
     server.timeout = 1
