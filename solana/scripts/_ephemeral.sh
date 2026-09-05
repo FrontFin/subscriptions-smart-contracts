@@ -6,8 +6,10 @@
 #   4. on exit — success, error, or Ctrl-C — any write buffer the run left
 #      behind is closed and every leftover lamport is swept back to the
 #      wallet automatically.
-# Override: set FEE_PAYER=<keypair path> to use a standing hot key instead
-# (skips the funding popup and the sweep).
+# Override: set FEE_PAYER=<keypair path> to use a standing hot key instead.
+# That path installs no cleanup at all: no funding popup, no buffer close, no
+# sweep. A write buffer an interrupted run leaves behind stays on that key,
+# holding its rent, until you close it yourself.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_secrets.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_buffers.sh"
 
@@ -19,16 +21,22 @@ _eph_cleanup() {
   if [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" && -n "$_EPH_SWEEP_TO" ]]; then
     # A half-finished run leaves its write buffer owned by this throwaway key,
     # which is deleted below — close it now or that rent is stranded for good.
-    local eph_pub strays
+    local eph_pub strays listed
     eph_pub=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || eph_pub=""
     if [[ -n "$eph_pub" ]]; then
-      strays=$(list_buffers "$eph_pub" "$_EPH_URL") || strays=""
+      listed=true
+      strays=$(list_buffers "$eph_pub" "$_EPH_URL") || { strays=""; listed=false; }
       [[ -z "$strays" ]] || echo "closing the write buffer this run left behind (rent → $_EPH_SWEEP_TO)..." >&2
       if ! solana program close --buffers -k "$EPHEMERAL" --authority "$EPHEMERAL" --recipient "$_EPH_SWEEP_TO" --url "$_EPH_URL" >/dev/null 2>&1; then
-        [[ -z "$strays" ]] || {
+        if [[ -n "$strays" ]]; then
           echo "⚠️  could not close it — its authority key is deleted on exit, so this rent is lost:" >&2
           echo "$strays" >&2
-        }
+        elif [[ "$listed" == false ]]; then
+          echo "⚠️  could not close the write buffer, and could not list what $eph_pub holds," >&2
+          echo "   so there may be one. Its authority key is deleted on exit, which makes that" >&2
+          echo "   rent unrecoverable. Check what was left behind with:" >&2
+          echo "     solana program show --buffers --buffer-authority $eph_pub --url $_EPH_URL" >&2
+        fi
       fi
     fi
 
@@ -51,13 +59,14 @@ _eph_cleanup() {
 
 # ephemeral_payer <authority-pubkey> <lamports> <rpc-http-url>
 # Sets PAYER_FILE. If FEE_PAYER is set in the environment, uses it directly
-# (no popup, no sweep); otherwise mints + browser-funds a throwaway.
+# (no popup, no buffer close, no sweep — no cleanup trap is installed at all);
+# otherwise mints + browser-funds a throwaway.
 ephemeral_payer() {
   local authority="$1" lamports="$2" rpc="$3"
   if [[ -n "${FEE_PAYER:-}" ]]; then
     [[ -f "$FEE_PAYER" ]] || { echo "error: FEE_PAYER keypair $FEE_PAYER not found" >&2; return 1; }
     PAYER_FILE="$FEE_PAYER"
-    echo "fee payer: $(solana-keygen pubkey "$PAYER_FILE") (FEE_PAYER override — no funding popup, no sweep)" >&2
+    echo "fee payer: $(solana-keygen pubkey "$PAYER_FILE") (FEE_PAYER override — no funding popup, no buffer close, no sweep)" >&2
     return 0
   fi
 

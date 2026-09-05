@@ -24,6 +24,12 @@ ENV="${1:?usage: scripts/deploy.sh <local|dev|prod>}"
 [[ "$ENV" != "test" ]] || { echo "error: 'test' is the LiteSVM fixture — never deployable (its puller keys are publicly derivable)" >&2; exit 1; }
 ENV_FILE=$(env_file "$ENV")
 UPGRADE_AUTHORITY=$(env_upgrade_authority "$ENV")
+# Nothing later can undo a bad value: the authority is handed the program
+# without ever signing, and the program keypair is discarded on exit.
+[[ "$UPGRADE_AUTHORITY" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]] || {
+  echo "error: UPGRADE_AUTHORITY '$UPGRADE_AUTHORITY' in $ENV_FILE is not a base58 address" >&2
+  exit 1
+}
 URL="mainnet-beta"
 RPC_URL="https://api.mainnet-beta.solana.com"
 
@@ -92,16 +98,28 @@ if ! solana program deploy "$ARTIFACT" \
   --max-len "$MAX_LEN" \
   --url "$URL"; then
   echo >&2
-  echo "🛑 deploy failed. Its write buffer (if any) belongs to the temporary payer" >&2
-  echo "   and is closed on exit, so that rent comes back to $UPGRADE_AUTHORITY." >&2
+  echo "🛑 deploy failed." >&2
+  if [[ -n "${FEE_PAYER:-}" ]]; then
+    PAYER_PUBKEY=$(solana-keygen pubkey "$PAYER_FILE" 2>/dev/null) || PAYER_PUBKEY=""
+    echo "   Its write buffer (if any) belongs to the FEE_PAYER override $PAYER_FILE," >&2
+    echo "   which this script never closes or sweeps. Recover that rent yourself:" >&2
+    echo "     solana program close --buffers -k $PAYER_FILE --authority $PAYER_FILE --recipient ${PAYER_PUBKEY:-<the fee payer address>} --url $URL" >&2
+    [[ -z "$PAYER_PUBKEY" ]] || report_stray_buffers "$PAYER_PUBKEY" "$URL" \
+      "solana program close --buffers -k $PAYER_FILE --authority $PAYER_FILE --recipient $PAYER_PUBKEY --url $URL"
+  else
+    echo "   Its write buffer (if any) belongs to the temporary payer and is closed on" >&2
+    echo "   exit, so that rent comes back to $UPGRADE_AUTHORITY." >&2
+  fi
   echo "   $ENV_FILE was NOT touched — re-running mints a fresh program id." >&2
-  echo "   If $PROGRAM_ID was already created on chain, its rent stays there: the" >&2
-  echo "   program key and the temporary payer are both discarded on exit." >&2
+  echo "   The program key is discarded on exit, so if $PROGRAM_ID was already created" >&2
+  echo "   on chain it keeps the rent it holds." >&2
   exit 1
 fi
 
 # Hand the upgrade authority to the wallet (signed by the temporary payer,
 # which held it for the seconds since the deploy).
+# The skip flag is structural, not a shortcut: the new authority never signs
+# here, and a Squads vault is a PDA with no private key that ever could.
 solana program set-upgrade-authority "$PROGRAM_ID" \
   --keypair "$PAYER_FILE" \
   --new-upgrade-authority "$UPGRADE_AUTHORITY" \

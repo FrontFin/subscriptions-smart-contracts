@@ -11,11 +11,14 @@
 
 # list_buffers <authority-pubkey> <url> — the CLI's own table rows. It pads the
 # table with blank lines and a "Buffer Address | ..." header even when it found
-# nothing, so both are stripped; empty output means no buffers. Non-zero means
-# the listing itself failed.
+# nothing, and may print unrelated notices on stdout, so only rows whose first
+# column is a base58 address are kept; empty output means no buffers. Non-zero
+# means the listing itself failed.
 list_buffers() {
-  solana program show --buffers --buffer-authority "$1" --url "$2" 2>/dev/null \
-    | awk 'NF && $1 != "Buffer"'
+  local table
+  table=$(solana program show --buffers --buffer-authority "$1" --url "$2" 2>/dev/null) || return 1
+  printf '%s\n' "$table" \
+    | awk 'length($1) >= 32 && length($1) <= 44 && $1 !~ /[^1-9A-HJ-NP-Za-km-z]/'
 }
 
 # report_stray_buffers <authority-pubkey> <url> [how-to-close]
