@@ -89,5 +89,6 @@ expected = os.environ['EXPECTED']
 if expected and pubkey != expected:
     sys.exit(f'error: key derives {pubkey}, expected {expected} — wrong key, nothing kept')
 
-with open(os.environ['OUT'], 'w') as f:
+fd = os.open(os.environ['OUT'], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, 'w') as f:
     json.dump(list(raw), f)
