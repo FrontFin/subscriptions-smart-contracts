@@ -36,8 +36,10 @@ grep -q '^PULLER_KEYS=' "$ENV_FILE" || {
 KEYS=$(grep '^PULLER_KEYS=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')
 
 # Whitespace-separated pubkeys on stdin -> one sorted, space-joined line, so
-# the wanted list and the on-chain list compare regardless of order.
-normalize_keys() { tr -s ' \t\n' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ $//'; }
+# the wanted list and the on-chain list compare regardless of order. LC_ALL=C
+# pins the byte ordering: a locale that collates case-insensitively would sort
+# the two lists differently and fail the comparison on identical key sets.
+normalize_keys() { tr -s ' \t\n' '\n' | sed '/^$/d' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//'; }
 
 # The signer must be the CURRENT config admin. Read it live from chain; if the
 # config isn't initialized yet, fall back to the upgrade authority (the
