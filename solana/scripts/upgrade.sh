@@ -74,6 +74,14 @@ while true; do
     solana confirm "$SIG" --url "$URL" || true
     solana program show "$PROGRAM_ID" --url "$URL"
     echo "buffer rent was refunded to $AUTHORITY (the spill account)."
+    # The upgraded binary requires the destination registry: until it exists,
+    # every pull is denied. A read that fails also lands here, on purpose.
+    REGISTRY_STATE=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null || true)
+    if [[ "$REGISTRY_STATE" != *"registry ver"* ]]; then
+      echo "⚠️  Destination registry NOT initialized — pulls will fail until you run:" >&2
+      echo "   cargo run -p admin-cli -- $PROGRAM_ID tx:$AUTHORITY $RPC_URL destinations <merchant-owner ...>" >&2
+      echo "   then sign the printed UNSIGNED_TX_B64 with: python3 scripts/sign_in_browser.py <b64> $AUTHORITY" >&2
+    fi
     exit 0
   fi
   echo

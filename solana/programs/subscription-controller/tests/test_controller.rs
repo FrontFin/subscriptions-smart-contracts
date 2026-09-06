@@ -133,6 +133,19 @@ fn set_destination_owners_ix(
     )
 }
 
+fn close_destination_registry_ix(env: &Env, admin: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::CloseDestinationRegistry {}.data(),
+        subscription_controller::accounts::CloseDestinationRegistry {
+            config: env.config,
+            destination_registry: env.destination_registry,
+            admin,
+        }
+        .to_account_metas(None),
+    )
+}
+
 fn accept_admin_ix(env: &Env, new_admin: Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         env.program_id,
@@ -556,7 +569,8 @@ fn close_config_is_blocked_while_a_handover_is_pending() {
     let ix = propose_admin_ix(&env, admin.pubkey(), new_admin.pubkey());
     send(&mut env, ix, &admin, &[&admin]).expect("admin proposes handover");
 
-    let err = send(&mut env, close_ix(&env, admin.pubkey()), &admin, &[&admin])
+    let ix = close_ix(&env, admin.pubkey());
+    let err = send(&mut env, ix, &admin, &[&admin])
         .expect_err("close must be refused while a handover is pending");
     let logs = err.meta.logs.join("\n");
     assert!(
@@ -572,7 +586,11 @@ fn close_config_is_blocked_while_a_handover_is_pending() {
 
     let ix = propose_admin_ix(&env, admin.pubkey(), Pubkey::default());
     send(&mut env, ix, &admin, &[&admin]).expect("admin cancels the handover");
-    send(&mut env, close_ix(&env, admin.pubkey()), &admin, &[&admin])
+
+    // A byte-identical retry is rejected as AlreadyProcessed without executing.
+    env.svm.expire_blockhash();
+    let ix = close_ix(&env, admin.pubkey());
+    send(&mut env, ix, &admin, &[&admin])
         .expect("close succeeds once no handover is pending");
 }
 
@@ -1646,10 +1664,63 @@ fn destination_owner_list_is_bounded_by_the_allocated_space() {
 }
 
 #[test]
+fn close_destination_registry_reclaims_rent_to_an_admin_who_pays_no_fee() {
+    let mut env = setup();
+    let admin = env.admin.insecure_clone();
+    let payer = Keypair::new();
+    env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+
+    let admin_before = env.svm.get_account(&admin.pubkey()).map(|a| a.lamports).unwrap_or(0);
+    let rent = env
+        .svm
+        .get_account(&env.destination_registry)
+        .expect("the registry exists")
+        .lamports;
+
+    let ix = close_destination_registry_ix(&env, admin.pubkey());
+    send(&mut env, ix, &payer, &[&payer, &admin])
+        .expect("close_destination_registry must work when the admin only signs");
+
+    assert!(env
+        .svm
+        .get_account(&env.destination_registry)
+        .map(|a| a.data.is_empty())
+        .unwrap_or(true));
+    let admin_after = env.svm.get_account(&admin.pubkey()).map(|a| a.lamports).unwrap_or(0);
+    assert_eq!(
+        admin_after,
+        admin_before + rent,
+        "the registry's rent must reach the admin, who paid no fee"
+    );
+}
+
+#[test]
+fn close_destination_registry_requires_the_admin() {
+    let mut env = setup();
+    let attacker = Keypair::new();
+    env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = close_destination_registry_ix(&env, attacker.pubkey());
+    let err = send(&mut env, ix, &attacker, &[&attacker])
+        .expect_err("a non-admin must not close the registry");
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains("Unauthorized"),
+        "expected Unauthorized, got:\n{logs}"
+    );
+    assert!(
+        env.svm
+            .get_account(&env.destination_registry)
+            .is_some_and(|a| !a.data.is_empty()),
+        "the registry must survive the refused close"
+    );
+}
+
+#[test]
 fn destination_registry_survives_a_config_close() {
-    // `close_config` deallocates the config, but nothing closes the registry.
-    // A re-initialized config therefore inherits the destination allowlist
-    // instead of starting from a blank one.
+    // `close_config` deallocates the config but leaves the registry standing,
+    // so a re-initialized config inherits the old destination allowlist. Only
+    // `close_destination_registry` clears it, and it must run first.
     let mut env = setup();
     let admin = env.admin.insecure_clone();
     let merchant = Pubkey::new_unique();

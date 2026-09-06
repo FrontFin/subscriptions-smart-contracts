@@ -30,4 +30,6 @@ pub enum ControllerError {
     DestinationOwnerNotAllowlisted,
     #[msg("Credited token account is not its owner's canonical associated token account")]
     DestinationIsNotCanonicalAta,
+    #[msg("Total amount debited does not match the amount credited to the destination")]
+    PullValueNotConserved,
 }

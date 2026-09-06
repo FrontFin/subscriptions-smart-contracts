@@ -2,7 +2,8 @@
 //! only, never builds or deploys code. Driven by the scripts in scripts/.
 //!
 //! Usage:
-//!   admin-cli <program-id> <signer> <rpc-url> keys    [puller-key ...]
+//!   admin-cli <program-id> <signer> <rpc-url> keys         [puller-key ...]
+//!   admin-cli <program-id> <signer> <rpc-url> destinations [owner ...]
 //!   admin-cli <program-id> <signer> <rpc-url> propose-admin <new-admin>
 //!   admin-cli <program-id> <signer> <rpc-url> accept-admin
 //!   admin-cli <program-id> <signer> <rpc-url> upgrade <buffer-address>
@@ -10,6 +11,7 @@
 //!   admin-cli <program-id> <signer> <rpc-url> transfer <to> <lamports>
 //!   admin-cli <program-id> <signer> <rpc-url> close    <recipient>   (loader: undeploy program)
 //!   admin-cli <program-id> <signer> <rpc-url> close-config           (reclaim config rent)
+//!   admin-cli <program-id> <signer> <rpc-url> close-registry         (reclaim registry rent)
 //!
 //! <signer> selects the mode:
 //!   a keypair file path — sign with it and send directly;
@@ -22,9 +24,10 @@
 //!                         for the Squads transaction builder.
 //!
 //! `keys` initializes the Config on first use, updates it afterwards; zero
-//! puller keys = the kill switch. `upgrade` builds the BPF-loader upgrade
-//! from a staged buffer (spill = the authority). `show` just prints the
-//! on-chain config.
+//! puller keys = the kill switch. `destinations` does the same for the
+//! destination registry; zero owners pays nobody. `upgrade` builds the
+//! BPF-loader upgrade from a staged buffer (spill = the authority). `show`
+//! just prints the on-chain config.
 
 use anchor_lang::prelude::Pubkey;
 use anchor_lang::solana_program::instruction::Instruction;
@@ -101,9 +104,10 @@ fn num_bigint(bytes: &[u8]) -> Vec<u32> {
     n
 }
 
-/// `None` means the config account does not exist. An RPC read that fails
-/// aborts instead of reporting absence: callers turn absence into `Initialize`,
-/// so conflating the two would silently downgrade a kill switch to a no-op.
+/// `None` means the config account does not exist, and nothing else. An RPC
+/// read that fails, or an account that does not deserialize, aborts instead of
+/// reporting absence: callers turn absence into `Initialize`, so conflating the
+/// two would silently downgrade a kill switch to a no-op.
 fn fetch_config(client: &RpcClient, config: &Pubkey) -> Option<subscription_controller::Config> {
     let account = match client.get_account_with_commitment(config, client.commitment()) {
         Ok(response) => response.value?,
@@ -112,12 +116,18 @@ fn fetch_config(client: &RpcClient, config: &Pubkey) -> Option<subscription_cont
             std::process::exit(1);
         }
     };
-    subscription_controller::Config::try_deserialize(&mut account.data.as_slice()).ok()
+    match subscription_controller::Config::try_deserialize(&mut account.data.as_slice()) {
+        Ok(state) => Some(state),
+        Err(err) => {
+            eprintln!("error: config {config} exists but does not deserialize: {err}");
+            std::process::exit(1);
+        }
+    }
 }
 
-/// `None` means the registry account does not exist. Same contract as
-/// `fetch_config`: an RPC failure aborts rather than reporting absence,
-/// because callers turn absence into a create.
+/// `None` means the registry account does not exist, and nothing else. Same
+/// contract as `fetch_config`: an RPC failure or undeserializable data aborts
+/// rather than reporting absence, because callers turn absence into a create.
 fn fetch_registry(
     client: &RpcClient,
     registry: &Pubkey,
@@ -129,7 +139,17 @@ fn fetch_registry(
             std::process::exit(1);
         }
     };
-    subscription_controller::DestinationRegistry::try_deserialize(&mut account.data.as_slice()).ok()
+    match subscription_controller::DestinationRegistry::try_deserialize(
+        &mut account.data.as_slice(),
+    ) {
+        Ok(state) => Some(state),
+        Err(err) => {
+            eprintln!(
+                "error: destination registry {registry} exists but does not deserialize: {err}"
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 fn print_config(client: &RpcClient, config: &Pubkey, registry: &Pubkey) {
@@ -167,9 +187,16 @@ fn print_config(client: &RpcClient, config: &Pubkey, registry: &Pubkey) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 4 {
-        eprintln!("usage: admin-cli <program-id> <signer-keypair|print> <rpc-url> keys  [puller-key ...]");
-        eprintln!("       admin-cli <program-id> <signer-keypair|print> <rpc-url> destinations [owner ...]");
-        eprintln!("       admin-cli <program-id> <signer-keypair|print> <rpc-url> admin <new-admin>");
+        eprintln!("usage: admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> keys          [puller-key ...]");
+        eprintln!("       admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> destinations  [owner ...]");
+        eprintln!("       admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> propose-admin <new-admin>");
+        eprintln!("       admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> accept-admin");
+        eprintln!("       admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> close-config");
+        eprintln!("       admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> close-registry");
+        eprintln!("       admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> upgrade  <buffer-address>");
+        eprintln!("       admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> close    <recipient>");
+        eprintln!("       admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> transfer <to> <lamports>");
+        eprintln!("       admin-cli <program-id> <signer-keypair|tx:pubkey|print> <rpc-url> show");
         std::process::exit(2);
     }
     let program_id = Pubkey::from_str(&args[0]).expect("invalid program id");
@@ -294,12 +321,27 @@ fn main() {
                 .to_account_metas(None),
             )
         }
+        "close-registry" => {
+            // Reclaim the registry's rent → admin. The instruction reads the
+            // config, so this only works BEFORE close-config.
+            println!("close_destination_registry (reclaim rent) — admin {admin_pubkey}");
+            Instruction::new_with_bytes(
+                program_id,
+                &subscription_controller::instruction::CloseDestinationRegistry {}.data(),
+                subscription_controller::accounts::CloseDestinationRegistry {
+                    config,
+                    destination_registry,
+                    admin: admin_pubkey,
+                }
+                .to_account_metas(None),
+            )
+        }
         "destinations" => {
             let destination_owners: Vec<Pubkey> = args[4..]
                 .iter()
                 .map(|k| Pubkey::from_str(k).expect("invalid destination owner"))
                 .collect();
-            if !print_only && fetch_registry(&client, &destination_registry).is_none() {
+            if fetch_registry(&client, &destination_registry).is_none() {
                 println!(
                     "registry {destination_registry} not found — creating it (admin = {admin_pubkey})"
                 );
@@ -413,7 +455,7 @@ fn main() {
             )
         }
         other => {
-            eprintln!("unknown command '{other}' (expected keys | destinations | propose-admin | accept-admin | close-config | upgrade | close | transfer | show)");
+            eprintln!("unknown command '{other}' (expected keys | destinations | propose-admin | accept-admin | close-config | close-registry | upgrade | close | transfer | show)");
             std::process::exit(2);
         }
     };

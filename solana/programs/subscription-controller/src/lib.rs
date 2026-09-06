@@ -50,8 +50,10 @@ impl Config {
 
 /// The keys a pull may pay. A pull is only accepted if the token account the
 /// CPI actually credited is the canonical associated token account of one of
-/// these owners, so a compromised puller key can move money on schedule but
-/// cannot redirect it.
+/// these owners. The list is GLOBAL, not per delegation: it keeps a payment
+/// inside the allowlisted set, but it does not tie one delegator to one
+/// destination, so a compromised puller key can still pay any allowlisted
+/// owner out of any delegation.
 ///
 /// This is a SEPARATE account rather than two more `Config` fields because
 /// `Config`'s byte layout is frozen by the live deployments (see
@@ -204,6 +206,22 @@ pub struct SetDestinationOwners<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Reclaim the destination registry's rent (teardown). Admin-gated; refund →
+/// admin.
+#[derive(Accounts)]
+pub struct CloseDestinationRegistry<'info> {
+    #[account(seeds = [CONFIG_SEED], bump, has_one = admin @ ControllerError::Unauthorized)]
+    pub config: Account<'info, Config>,
+
+    #[account(mut, seeds = [DESTINATIONS_SEED], bump, close = admin)]
+    pub destination_registry: Account<'info, DestinationRegistry>,
+
+    /// Receives the registry's rent, so it must be writable even when it is not
+    /// the fee payer (a Squads vault admin never is).
+    #[account(mut)]
+    pub admin: Signer<'info>,
+}
+
 /// Trigger one recurring-delegation pull.
 ///
 /// The program is a *verified signer proxy*: it checks the gate (signer is in
@@ -262,6 +280,7 @@ struct CreditedDestination {
     token_program: Pubkey,
     owner: Pubkey,
     received: u64,
+    debited: u64,
 }
 
 fn pubkey_at(data: &[u8], offset: usize) -> Pubkey {
@@ -303,10 +322,23 @@ fn snapshot_token_accounts(
     Ok(snapshots)
 }
 
+fn total_debited(before: &[TokenAccountSnapshot], after: &[TokenAccountSnapshot]) -> u64 {
+    let mut debited: u64 = 0;
+    for account in before {
+        let current = after
+            .iter()
+            .find(|s| s.address == account.address)
+            .map_or(0, |s| s.amount);
+        debited = debited.saturating_add(account.amount.saturating_sub(current));
+    }
+    debited
+}
+
 fn credited_destination(
     before: &[TokenAccountSnapshot],
     after: &[TokenAccountSnapshot],
 ) -> Result<CreditedDestination> {
+    let debited = total_debited(before, after);
     let mut credited: Option<CreditedDestination> = None;
     for account in after {
         let previous = before
@@ -325,6 +357,7 @@ fn credited_destination(
             token_program: account.token_program,
             owner: account.owner,
             received: account.amount - previous,
+            debited,
         });
     }
     credited.ok_or_else(|| error!(ControllerError::NoDestinationCredited))
@@ -430,6 +463,14 @@ pub mod subscription_controller {
         Ok(())
     }
 
+    /// Admin: close the destination registry and reclaim its rent (teardown
+    /// only — afterwards `pull` fails until a new registry is created). Must
+    /// run BEFORE `close_config`: this instruction reads the config to check
+    /// the admin, so a closed config leaves the registry unclosable.
+    pub fn close_destination_registry(_ctx: Context<CloseDestinationRegistry>) -> Result<()> {
+        Ok(())
+    }
+
     /// Puller key: gate + forward one native pull, signing as `MeshDelegate`.
     pub fn pull<'info>(ctx: Context<'info, Pull<'info>>, native_data: Vec<u8>) -> Result<()> {
         // Authorization: the signer must be listed in the config. An empty
@@ -502,6 +543,14 @@ pub mod subscription_controller {
         // than one means the payout cannot be attributed — both revert.
         let after = snapshot_token_accounts(ctx.remaining_accounts, &mint)?;
         let credited = credited_destination(&before, &after)?;
+
+        // Every token of the mint that left an account must land in the one
+        // that was credited. A mint charging a transfer fee debits more than it
+        // credits, so this rejects such mints outright.
+        require!(
+            credited.debited == credited.received,
+            ControllerError::PullValueNotConserved
+        );
 
         require!(
             ctx.accounts
