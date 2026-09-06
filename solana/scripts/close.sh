@@ -71,7 +71,14 @@ while true; do
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || { echo "aborted"; exit 1; }
 done
 
-SCRUBBED=$(mktemp)
+# Rename into place instead of truncating the original. This runs after the
+# program id has already been burned, so a write interrupted here would leave
+# an empty file and destroy the only remaining record of the environment. The
+# temp file sits beside the target so the rename is atomic, and is copied first
+# so it inherits the original's mode.
+SCRUBBED="scripts/envs/$ENV.env.tmp.$$"
+trap 'rm -f "$SCRUBBED"' EXIT
+cp -p "scripts/envs/$ENV.env" "$SCRUBBED"
 sed \
   -e '/^PROGRAM_ID=/d' \
   -e '/^# \^ the smart contract address/d' \
@@ -81,7 +88,6 @@ sed \
   -e '/^# becomes the .delegatee. recorded/d' \
   -e '/^# MeshDelegate PDA = /d' \
   "scripts/envs/$ENV.env" > "$SCRUBBED"
-cat "$SCRUBBED" > "scripts/envs/$ENV.env"
-rm -f "$SCRUBBED"
+mv "$SCRUBBED" "scripts/envs/$ENV.env"
 echo "Done. Rent refunded to $RECIPIENT."
 echo "Unpinned the burned PROGRAM_ID from scripts/envs/$ENV.env — the next deploy mints a fresh id/PDA."
