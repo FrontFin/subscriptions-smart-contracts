@@ -101,9 +101,10 @@ fn num_bigint(bytes: &[u8]) -> Vec<u32> {
     n
 }
 
-/// `None` means the config account does not exist. An RPC read that fails
-/// aborts instead of reporting absence: callers turn absence into `Initialize`,
-/// so conflating the two would silently downgrade a kill switch to a no-op.
+/// `None` means the config account does not exist, and nothing else. An RPC
+/// read that fails, or an account that does not deserialize, aborts instead of
+/// reporting absence: callers turn absence into `Initialize`, so conflating the
+/// two would silently downgrade a kill switch to a no-op.
 fn fetch_config(client: &RpcClient, config: &Pubkey) -> Option<subscription_controller::Config> {
     let account = match client.get_account_with_commitment(config, client.commitment()) {
         Ok(response) => response.value?,
@@ -112,7 +113,13 @@ fn fetch_config(client: &RpcClient, config: &Pubkey) -> Option<subscription_cont
             std::process::exit(1);
         }
     };
-    subscription_controller::Config::try_deserialize(&mut account.data.as_slice()).ok()
+    match subscription_controller::Config::try_deserialize(&mut account.data.as_slice()) {
+        Ok(state) => Some(state),
+        Err(err) => {
+            eprintln!("error: config {config} exists but does not deserialize: {err}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn print_config(client: &RpcClient, config: &Pubkey) {
