@@ -67,11 +67,12 @@ puller (hot key) → controller.pull → invoke_signed(MeshDelegate) → native 
    program id alone, so it is stable across upgrades and key rotations; a seed
    change would strand every existing delegation.
 
-7. **Accepted tradeoff (H1):** within `pull_payment` the destination and amount
-   are caller-chosen, so a compromised puller key can pull up to the per-period
-   cap to any address. Bounded by kill switch + rotation, **not** by this
-   program. A destination allow-list was deliberately left out to keep the
-   program minimal; revisit if the threat model demands it.
+7. **Closed (H1):** within `pull_payment` the amount stays caller-chosen, capped
+   per period by the native program. The destination no longer is. A pull must
+   credit exactly one token account, whose owner is on the `DestinationRegistry`
+   allow-list and whose address is that owner's canonical ATA, and the total
+   debited must equal the amount credited. An empty allow-list pays nobody, so
+   it is a second kill switch alongside the puller keys.
 
 ## Operational model (decisions)
 
