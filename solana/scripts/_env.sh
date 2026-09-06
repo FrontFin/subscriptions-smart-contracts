@@ -12,6 +12,28 @@ env_file() {
   echo "$f"
 }
 
+# Fails unless the value decodes to exactly 32 bytes. The base58 alphabet and a
+# 32..44 character band are not enough on their own: a paste that loses a couple
+# of characters stays inside the band and still decodes short.
+require_pubkey() {
+  local value="$1" label="$2"
+  python3 - "$value" <<'PY' && return 0
+import sys
+ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+text = sys.argv[1]
+if not text or any(c not in ALPHABET for c in text):
+    sys.exit(1)
+value = 0
+for char in text:
+    value = value * 58 + ALPHABET.index(char)
+raw = b'\x00' * (len(text) - len(text.lstrip('1')))
+raw += value.to_bytes((value.bit_length() + 7) // 8, 'big')
+sys.exit(0 if len(raw) == 32 else 1)
+PY
+  echo "error: $label '$value' is not a 32-byte base58 address" >&2
+  return 1
+}
+
 # Prints the env's upgrade-authority pubkey (public; the private key is
 # prompted at deploy/close time, never stored).
 env_upgrade_authority() {

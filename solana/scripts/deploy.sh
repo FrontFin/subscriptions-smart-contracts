@@ -26,10 +26,7 @@ ENV_FILE=$(env_file "$ENV")
 UPGRADE_AUTHORITY=$(env_upgrade_authority "$ENV")
 # Nothing later can undo a bad value: the authority is handed the program
 # without ever signing, and the program keypair is discarded on exit.
-[[ "$UPGRADE_AUTHORITY" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]] || {
-  echo "error: UPGRADE_AUTHORITY '$UPGRADE_AUTHORITY' in $ENV_FILE is not a base58 address" >&2
-  exit 1
-}
+require_pubkey "$UPGRADE_AUTHORITY" "UPGRADE_AUTHORITY in $ENV_FILE" || exit 1
 URL="mainnet-beta"
 RPC_URL="https://api.mainnet-beta.solana.com"
 
