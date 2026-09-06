@@ -1750,3 +1750,259 @@ fn destination_registry_survives_a_config_close() {
     assert_eq!(registry.data[8], 1);
     assert_eq!(&registry.data[13..45], merchant.as_ref());
 }
+
+// ---------------------------------------------------------------------------
+// Token-2022 with a transfer fee. The native program forwards whichever token
+// program the account list names, so a fee-bearing mint reaches `pull`:
+// TransferChecked debits the source in full and credits the destination the
+// remainder, parking the fee in the TransferFeeAmount extension — a byte range
+// outside the 165-byte base layout the snapshot reads.
+// ---------------------------------------------------------------------------
+
+mod token_2022 {
+    use super::*;
+    use anchor_lang::solana_program::instruction::AccountMeta;
+    use std::str::FromStr;
+
+    pub const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+    pub fn token_program() -> Pubkey {
+        Pubkey::from_str(TOKEN_2022_PROGRAM).unwrap()
+    }
+
+    pub fn ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+        Pubkey::find_program_address(
+            &[owner.as_ref(), token_program().as_ref(), mint.as_ref()],
+            &Pubkey::from_str(native::ATA_PROGRAM).unwrap(),
+        )
+        .0
+    }
+
+    /// `TransferFee`: epoch(8) + maximum_fee(8) + basis_points(2), LE.
+    fn transfer_fee(basis_points: u16) -> Vec<u8> {
+        let mut fee = Vec::with_capacity(18);
+        fee.extend_from_slice(&0u64.to_le_bytes());
+        fee.extend_from_slice(&u64::MAX.to_le_bytes());
+        fee.extend_from_slice(&basis_points.to_le_bytes());
+        fee
+    }
+
+    /// Mint: 82-byte classic base padded to 165, AccountType::Mint at 165, then
+    /// a TLV `TransferFeeConfig` (type 1, len 108).
+    pub fn mint_with_transfer_fee(
+        authority: &Pubkey,
+        supply: u64,
+        decimals: u8,
+        basis_points: u16,
+    ) -> Vec<u8> {
+        let mut data = vec![0u8; 166];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes());
+        data[4..36].copy_from_slice(authority.as_ref());
+        data[36..44].copy_from_slice(&supply.to_le_bytes());
+        data[44] = decimals;
+        data[45] = 1;
+        data[165] = 1;
+
+        let mut config = Vec::with_capacity(108);
+        config.extend_from_slice(&[0u8; 32]);
+        config.extend_from_slice(&[0u8; 32]);
+        config.extend_from_slice(&0u64.to_le_bytes());
+        config.extend_from_slice(&transfer_fee(basis_points));
+        config.extend_from_slice(&transfer_fee(basis_points));
+
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&(config.len() as u16).to_le_bytes());
+        data.extend_from_slice(&config);
+        data
+    }
+
+    /// Token account: 165-byte classic base, AccountType::Account at 165, then
+    /// a TLV `TransferFeeAmount` (type 2, len 8).
+    pub fn token_account_with_withheld(mint: &Pubkey, owner: &Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = vec![0u8; 166];
+        data[0..32].copy_from_slice(mint.as_ref());
+        data[32..64].copy_from_slice(owner.as_ref());
+        data[64..72].copy_from_slice(&amount.to_le_bytes());
+        data[108] = 1;
+        data[165] = 2;
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(&8u16.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data
+    }
+
+    pub fn withheld_amount(data: &[u8]) -> u64 {
+        u64::from_le_bytes(data[170..178].try_into().unwrap())
+    }
+
+    pub fn initialize_authority_ix(user: &Pubkey, mint: &Pubkey) -> Instruction {
+        Instruction::new_with_bytes(
+            SUBSCRIPTIONS_PROGRAM,
+            &[0u8],
+            vec![
+                AccountMeta::new(*user, true),
+                AccountMeta::new(native::subscription_authority(user, mint), false),
+                AccountMeta::new_readonly(*mint, false),
+                AccountMeta::new(ata(user, mint), false),
+                AccountMeta::new_readonly(
+                    Pubkey::from_str(native::SYSTEM_PROGRAM).unwrap(),
+                    false,
+                ),
+                AccountMeta::new_readonly(token_program(), false),
+            ],
+        )
+    }
+
+    pub fn pull_payment_metas(
+        delegation: &Pubkey,
+        delegator: &Pubkey,
+        delegatee: &Pubkey,
+        mint: &Pubkey,
+        destination: &Pubkey,
+    ) -> Vec<AccountMeta> {
+        vec![
+            AccountMeta::new(*delegation, false),
+            AccountMeta::new_readonly(native::subscription_authority(delegator, mint), false),
+            AccountMeta::new(ata(delegator, mint), false),
+            AccountMeta::new(*destination, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new_readonly(token_program(), false),
+            AccountMeta::new_readonly(*delegatee, false),
+            AccountMeta::new_readonly(native::event_authority(), false),
+            AccountMeta::new_readonly(SUBSCRIPTIONS_PROGRAM, false),
+        ]
+    }
+}
+
+#[test]
+fn pull_is_rejected_for_a_fee_bearing_mint_that_shortchanges_the_merchant() {
+    use anchor_lang::solana_program::clock::Clock;
+    use solana_account::Account;
+
+    const DECIMALS: u8 = 6;
+    const FUNDED: u64 = 100_000_000;
+    const AMOUNT_PER_PERIOD: u64 = 50_000_000;
+    const FEE_BASIS_POINTS: u16 = 9_900;
+
+    let mut env = setup();
+    let native_program = include_bytes!("fixtures/subscriptions_program.so");
+    env.svm
+        .add_program(SUBSCRIPTIONS_PROGRAM, native_program)
+        .unwrap();
+
+    #[allow(deprecated)]
+    let mainnet_rent = anchor_lang::solana_program::rent::Rent {
+        lamports_per_byte_year: 3480,
+        exemption_threshold: 1.0,
+        burn_percent: 50,
+    };
+    env.svm.set_sysvar(&mainnet_rent);
+
+    let puller = env.pullers[0].insecure_clone();
+    let delegator = Keypair::new();
+    let merchant = Pubkey::new_unique();
+    env.svm.airdrop(&puller.pubkey(), 10_000_000_000).unwrap();
+    env.svm.airdrop(&delegator.pubkey(), 10_000_000_000).unwrap();
+
+    let mint = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let source_ata = token_2022::ata(&delegator.pubkey(), &mint);
+    let dest_ata = token_2022::ata(&merchant, &mint);
+    for (address, data) in [
+        (
+            mint,
+            token_2022::mint_with_transfer_fee(
+                &mint_authority,
+                FUNDED,
+                DECIMALS,
+                FEE_BASIS_POINTS,
+            ),
+        ),
+        (
+            source_ata,
+            token_2022::token_account_with_withheld(&mint, &delegator.pubkey(), FUNDED),
+        ),
+        (
+            dest_ata,
+            token_2022::token_account_with_withheld(&mint, &merchant, 0),
+        ),
+    ] {
+        env.svm
+            .set_account(
+                address,
+                Account {
+                    lamports: 10_000_000,
+                    data,
+                    owner: token_2022::token_program(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    let init_ix = token_2022::initialize_authority_ix(&delegator.pubkey(), &mint);
+    send(&mut env, init_ix, &delegator, &[&delegator]).expect("initialize_authority");
+
+    let authority = native::subscription_authority(&delegator.pubkey(), &mint);
+    let authority_account = env.svm.get_account(&authority).expect("authority created");
+    let init_id = i64::from_le_bytes(authority_account.data[98..106].try_into().unwrap());
+
+    let clock: Clock = env.svm.get_sysvar();
+    let nonce = 1u64;
+    let create_ix = native::create_delegation_ix(
+        &delegator.pubkey(),
+        &env.delegate,
+        &mint,
+        nonce,
+        AMOUNT_PER_PERIOD,
+        3600,
+        clock.unix_timestamp,
+        clock.unix_timestamp + 30 * 86_400,
+        init_id,
+    );
+    send(&mut env, create_ix, &delegator, &[&delegator]).expect("create_recurring_delegation");
+    let delegation =
+        native::recurring_delegation(&authority, &delegator.pubkey(), &env.delegate, nonce);
+
+    let admin = env.admin.insecure_clone();
+    let allow_ix = set_destination_owners_ix(&env, admin.pubkey(), vec![merchant]);
+    send(&mut env, allow_ix, &admin, &[&admin]).expect("admin allowlists the merchant");
+
+    let native_data = native::pull_payment_data(AMOUNT_PER_PERIOD, &delegator.pubkey(), &mint);
+    let mut metas = subscription_controller::accounts::Pull {
+        delegate: env.delegate,
+        puller_key: puller.pubkey(),
+        subscriptions_program: SUBSCRIPTIONS_PROGRAM,
+        config: env.config,
+        destination_registry: env.destination_registry,
+    }
+    .to_account_metas(None);
+    metas.extend(token_2022::pull_payment_metas(
+        &delegation,
+        &delegator.pubkey(),
+        &env.delegate,
+        &mint,
+        &dest_ata,
+    ));
+    let ix = Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::Pull { native_data }.data(),
+        metas,
+    );
+
+    let err = send(&mut env, ix, &puller, &[&puller])
+        .expect_err("a mint that keeps 99% of the transfer must not settle a subscription");
+    let logs = err.meta.logs.join("\n");
+    assert!(!logs.is_empty(), "the pull must reach execution");
+    assert!(
+        logs.contains("PullValueNotConserved"),
+        "expected PullValueNotConserved, got:\n{logs}"
+    );
+
+    let source = env.svm.get_account(&source_ata).unwrap();
+    let destination = env.svm.get_account(&dest_ata).unwrap();
+    assert_eq!(native::token_amount(&source.data), FUNDED);
+    assert_eq!(native::token_amount(&destination.data), 0);
+    assert_eq!(token_2022::withheld_amount(&destination.data), 0);
+}
