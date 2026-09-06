@@ -159,8 +159,10 @@ $INITIALIZED || echo "⚠️  Config NOT initialized — pulls will fail until y
 # so a front-run needs that key — but confirm WE own the resulting config
 # anyway rather than let you wire a backend to a config you don't control.
 if $INITIALIZED; then
+  # `|| true`: under `set -euo pipefail` a transient RPC or build failure here
+  # would exit before the warning below, which is the branch written for it.
   ON_CHAIN_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show \
-    | awk '$1=="admin"{print $3}')
+    | awk '$1=="admin"{print $3}' || true)
   if [[ -z "$ON_CHAIN_ADMIN" ]]; then
     echo "⚠️  could not read the config admin back — the RPC returned nothing." >&2
     echo "   PROGRAM_ID is already pinned in $ENV_FILE; verify before wiring the backend:" >&2
