@@ -632,9 +632,13 @@ fn empty_list_is_the_kill_switch() {
     // Resume: restore the list. The same key pulls again (past the gate).
     let ix = set_puller_keys_ix(&env, admin.pubkey(), vec![puller.pubkey()]);
     send(&mut env, ix, &admin, &[&admin]).expect("admin resumes");
+    // A byte-identical retry is rejected as AlreadyProcessed without executing.
+    env.svm.expire_blockhash();
     let ix = pull_ix(&env, puller.pubkey(), SUBSCRIPTIONS_PROGRAM);
     let err = send(&mut env, ix, &puller, &[&puller]).unwrap_err();
-    assert!(!err.meta.logs.join("\n").contains("Unauthorized"));
+    let logs = err.meta.logs.join("\n");
+    assert!(!logs.is_empty(), "the pull must reach execution");
+    assert!(!logs.contains("Unauthorized"), "expected past the gate, got:\n{logs}");
 }
 
 // ---------------------------------------------------------------------------
