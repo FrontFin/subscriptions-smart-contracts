@@ -136,8 +136,8 @@ $INITIALIZED || echo "⚠️  Config NOT initialized — pulls will fail until y
 # so a front-run needs that key — but confirm WE own the resulting config
 # anyway rather than let you wire a backend to a config you don't control.
 if $INITIALIZED; then
-  ON_CHAIN_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show \
-    | awk '$1=="admin"{print $3}')
+  CONFIG_STATE=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show || true)
+  ON_CHAIN_ADMIN=$(echo "$CONFIG_STATE" | awk '$1=="admin"{print $3}')
   if [[ -z "$ON_CHAIN_ADMIN" ]]; then
     echo "⚠️  could not read the config admin back — the RPC returned nothing." >&2
     echo "   PROGRAM_ID is already pinned in $ENV_FILE; verify before wiring the backend:" >&2
@@ -148,6 +148,22 @@ if $INITIALIZED; then
     exit 1
   else
     echo "verified: config admin = $UPGRADE_AUTHORITY"
+  fi
+
+  # Nothing above creates the destination registry, and `pull` requires it, so
+  # a first deploy always lands without one. An existing but EMPTY registry
+  # pays nobody, which looks identical from the outside — report both.
+  REGISTRY_SIGNER="${ON_CHAIN_ADMIN:-$UPGRADE_AUTHORITY}"
+  if [[ "$CONFIG_STATE" != *"registry ver"* ]]; then
+    echo "⚠️  Destination registry NOT created — EVERY pull is denied until you run:" >&2
+  elif [[ "$CONFIG_STATE" == *"<EMPTY"* ]]; then
+    echo "⚠️  Destination registry is EMPTY — no destination is payable until you run:" >&2
+  else
+    REGISTRY_SIGNER=""
+  fi
+  if [[ -n "$REGISTRY_SIGNER" ]]; then
+    echo "   cargo run -p admin-cli -- $PROGRAM_ID tx:$REGISTRY_SIGNER $RPC_URL destinations <merchant-owner ...>" >&2
+    echo "   then sign the printed UNSIGNED_TX_B64 with: python3 scripts/sign_in_browser.py <b64> $REGISTRY_SIGNER" >&2
   fi
 fi
 

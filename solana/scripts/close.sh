@@ -50,12 +50,15 @@ reclaim_rent() {
     return 0
   fi
   echo "reclaiming $label rent (admin $CONFIG_ADMIN)..."
-  if sig=$(python3 scripts/sign_in_browser.py "$b64" "$CONFIG_ADMIN"); then
-    echo "$label closed: $sig"
-    solana confirm "$sig" --url "$URL" >/dev/null 2>&1 || true
-  else
-    echo "⚠️  $label close not signed — its rent ($rent) will be orphaned." >&2
+  if ! sig=$(python3 scripts/sign_in_browser.py "$b64" "$CONFIG_ADMIN"); then
+    echo "⚠️  $label close was not signed — its rent ($rent) is still on chain." >&2
+    return 1
   fi
+  if ! solana confirm "$sig" --url "$URL" >/dev/null 2>&1; then
+    echo "⚠️  $label close $sig did not confirm — its rent ($rent) is still on chain." >&2
+    return 1
+  fi
+  echo "$label closed: $sig"
 }
 
 # First reclaim the account rents, while the program is still live (closing the
@@ -66,8 +69,18 @@ reclaim_rent() {
 CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null \
   | awk '$1=="admin"{print $3}')
 if [[ -n "$CONFIG_ADMIN" ]]; then
-  reclaim_rent close-registry "destination registry" "~0.0043 SOL"
-  reclaim_rent close-config "config" "~0.0035 SOL"
+  # Closing the config while the registry is still there strands the registry
+  # for good, on a program id this script is about to burn. A registry close
+  # that was attempted and did not land therefore stops the teardown.
+  if ! reclaim_rent close-registry "destination registry" "~0.0043 SOL"; then
+    echo >&2
+    echo "🛑 aborting the teardown: the destination registry is still on chain." >&2
+    echo "   Closing the config now would make it unclosable forever, and the" >&2
+    echo "   program id is burned a few lines below. Nothing has been destroyed —" >&2
+    echo "   re-run scripts/close.sh $ENV once the registry close goes through." >&2
+    exit 1
+  fi
+  reclaim_rent close-config "config" "~0.0035 SOL" || true
 else
   echo "no config found on-chain — skipping the rent reclaims (without a config the registry cannot be closed either)."
 fi
