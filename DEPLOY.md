@@ -1,7 +1,7 @@
 # Deploying the Mesh Subscription Controller
 
 Steps first, background last. The why is in the
-[TDD](../docs/solana-subscription-controller-tdd.md).
+[TDD](docs/solana-subscription-controller-tdd.md).
 
 > **Mainnet-only, money-moving.** Every signature is a popup in your browser
 > wallet (Phantom / Solflare / Backpack) via a localhost bridge — no private
@@ -81,6 +81,20 @@ wallet accepts). Two transactions signed by two different wallets:
   ```
    If you control both wallets, run both yourself. Then update
    `UPGRADE_AUTHORITY` in `scripts/envs/<env>.env` to the new wallet.
+
+### The upgrade authority outranks the config admin
+
+While a single wallet still holds the upgrade authority, an admin handover is
+**not** a boundary against that wallet. It can take the admin role back:
+
+- The upgrade authority can replace the program's code with anything.
+- `initialize` is gated on the upgrade authority and the `Config` PDA has a
+  fixed seed, so once the config account is closed the upgrade authority can
+  call `initialize` again and be admin.
+
+So treat "upgrade authority" and "config admin" as one role until
+`scripts/migrate-to-squads.sh` has moved **both** to a Squads multisig. Only
+then does the handover mean anything on its own.
 
 
 
