@@ -13,16 +13,39 @@ EPHEMERAL=""
 _EPH_SWEEP_TO=""
 _EPH_URL="mainnet-beta"
 
+# Takes the throwaway keypair off the deletion list, so a funded key that
+# could not be swept survives `_secrets_cleanup`.
+_eph_keep_payer_keypair() {
+  local kept=()
+  local file
+  for file in ${SECRET_TMPFILES[@]+"${SECRET_TMPFILES[@]}"}; do
+    [[ "$file" == "$EPHEMERAL" ]] || kept+=("$file")
+  done
+  SECRET_TMPFILES=(${kept[@]+"${kept[@]}"})
+}
+
 _eph_cleanup() {
   if [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" && -n "$_EPH_SWEEP_TO" ]]; then
-    local bal
-    bal=$(solana balance -k "$EPHEMERAL" -u "$_EPH_URL" 2>/dev/null | awk '{print $1}')
-    if [[ -n "$bal" && "$bal" != "0" ]]; then
-      echo "sweeping $bal SOL from the temporary payer back to $_EPH_SWEEP_TO..." >&2
+    # A failed balance read must not abort the trap: an unknown balance is
+    # treated as "possibly funded" and swept anyway.
+    local bal=""
+    bal=$(solana balance -k "$EPHEMERAL" -u "$_EPH_URL" 2>/dev/null | awk '{print $1}') || bal=""
+    if [[ "$bal" != "0" ]]; then
+      echo "sweeping ${bal:-an unknown amount of} SOL from the temporary payer back to $_EPH_SWEEP_TO..." >&2
       if ! solana transfer "$_EPH_SWEEP_TO" ALL --keypair "$EPHEMERAL" --url "$_EPH_URL" >/dev/null 2>&1; then
-        local rescue="${TMPDIR:-/tmp}/mesh-unswept-payer-$(solana-keygen pubkey "$EPHEMERAL").json"
-        cp "$EPHEMERAL" "$rescue" && chmod 600 "$rescue"
-        echo "⚠️  SWEEP FAILED — $bal SOL is still on the temporary payer." >&2
+        local pubkey="" rescue=""
+        pubkey=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || pubkey=""
+        if [[ -n "$pubkey" ]]; then
+          rescue="${TMPDIR:-/tmp}/mesh-unswept-payer-$pubkey.json"
+          if ! (cp "$EPHEMERAL" "$rescue" && chmod 600 "$rescue"); then
+            rescue=""
+          fi
+        fi
+        if [[ -z "$rescue" ]]; then
+          rescue="$EPHEMERAL"
+          _eph_keep_payer_keypair
+        fi
+        echo "⚠️  SWEEP FAILED — ${bal:-an unknown amount of} SOL is still on the temporary payer." >&2
         echo "   Its key is kept at: $rescue" >&2
         echo "   Recover with: solana transfer $_EPH_SWEEP_TO ALL --keypair $rescue --url $_EPH_URL" >&2
         echo "   DELETE that file once the funds are back." >&2

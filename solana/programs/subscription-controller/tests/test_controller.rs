@@ -455,7 +455,8 @@ fn close_config_is_blocked_while_a_handover_is_pending() {
     let ix = propose_admin_ix(&env, admin.pubkey(), new_admin.pubkey());
     send(&mut env, ix, &admin, &[&admin]).expect("admin proposes handover");
 
-    let err = send(&mut env, close_ix(&env, admin.pubkey()), &admin, &[&admin])
+    let ix = close_ix(&env, admin.pubkey());
+    let err = send(&mut env, ix, &admin, &[&admin])
         .expect_err("close must be refused while a handover is pending");
     let logs = err.meta.logs.join("\n");
     assert!(
@@ -471,7 +472,11 @@ fn close_config_is_blocked_while_a_handover_is_pending() {
 
     let ix = propose_admin_ix(&env, admin.pubkey(), Pubkey::default());
     send(&mut env, ix, &admin, &[&admin]).expect("admin cancels the handover");
-    send(&mut env, close_ix(&env, admin.pubkey()), &admin, &[&admin])
+
+    // A byte-identical retry is rejected as AlreadyProcessed without executing.
+    env.svm.expire_blockhash();
+    let ix = close_ix(&env, admin.pubkey());
+    send(&mut env, ix, &admin, &[&admin])
         .expect("close succeeds once no handover is pending");
 }
 
