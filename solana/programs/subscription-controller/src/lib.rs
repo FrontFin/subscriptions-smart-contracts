@@ -12,9 +12,6 @@ pub use error::*;
 
 declare_id!("GowYj1dH8kM9sD88cEFk8PExCkct7AqLWGvTkWz6evoD");
 
-// Embedded contact info for security researchers (parsed by explorers —
-// shows as "security.txt" on Solscan). Baked into the binary; applies to an
-// env on its next deploy/upgrade.
 #[cfg(not(feature = "no-entrypoint"))]
 solana_security_txt::security_txt! {
     name: "Mesh Subscription Controller",
@@ -24,22 +21,13 @@ solana_security_txt::security_txt! {
     preferred_languages: "en"
 }
 
-/// On-chain configuration — the puller-key allowlist lives in DATA, not code,
-/// so key rotation and the kill switch are single transactions that never
-/// modify the (audited) program binary.
+/// On-chain allowlist. Field order is fixed by deployed Borsh accounts.
 #[account]
 pub struct Config {
-    /// The only key allowed to call the admin instructions (set at
-    /// `initialize` to the initializer; changed via the two-step handover).
     pub admin: Pubkey,
-    /// Pubkeys allowed to trigger `pull`. EMPTY list = kill switch ("pause"):
-    /// no key is authorized, every pull fails `Unauthorized`.
+    /// Empty disables all pulls.
     pub puller_keys: Vec<Pubkey>,
-    /// Two-step admin handover target: `propose_admin` sets it, `accept_admin`
-    /// (signed by it) promotes it. `Pubkey::default()` = none pending.
-    /// NB: do not reorder `Config`'s fields once deployed — the on-chain
-    /// account layout is fixed at creation, and reordering would misread every
-    /// existing config.
+    /// Pending handover recipient; Pubkey::default() means none.
     pub pending_admin: Pubkey,
 }
 
@@ -50,19 +38,13 @@ impl Config {
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    /// The singleton config. `init` makes re-initialization impossible.
     #[account(init, payer = admin, space = Config::SPACE, seeds = [CONFIG_SEED], bump)]
     pub config: Account<'info, Config>,
 
-    /// Becomes the config's admin; pays the config account's rent. Gated to the
-    /// program's upgrade authority (see `program_data`), so `initialize` cannot
-    /// be front-run by an arbitrary caller right after deploy.
     #[account(mut)]
     pub admin: Signer<'info>,
 
-    /// The program's ProgramData account (BPF upgradeable loader). Its recorded
-    /// upgrade authority must equal `admin` — this is what restricts
-    /// `initialize` to whoever controls the deployed program.
+    /// Restricts initialization to the deployed program's upgrade authority.
     #[account(
         seeds = [crate::ID.as_ref()],
         bump,
@@ -74,7 +56,6 @@ pub struct Initialize<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Any admin-gated mutation (set puller keys, propose a new admin).
 #[derive(Accounts)]
 pub struct AdminAction<'info> {
     #[account(mut, seeds = [CONFIG_SEED], bump, has_one = admin @ ControllerError::Unauthorized)]
@@ -83,7 +64,6 @@ pub struct AdminAction<'info> {
     pub admin: Signer<'info>,
 }
 
-/// Second step of the handover: the pending admin claims the role.
 #[derive(Accounts)]
 pub struct AcceptAdmin<'info> {
     #[account(
@@ -97,7 +77,6 @@ pub struct AcceptAdmin<'info> {
     pub new_admin: Signer<'info>,
 }
 
-/// Reclaim the config account's rent (teardown). Admin-gated; refund → admin.
 #[derive(Accounts)]
 pub struct CloseConfig<'info> {
     #[account(
@@ -110,41 +89,25 @@ pub struct CloseConfig<'info> {
     )]
     pub config: Account<'info, Config>,
 
-    /// Receives the config's rent, so it must be writable even when it is not
-    /// the fee payer (a Squads vault admin never is).
+    /// Rent recipient must be writable even when it is not the fee payer.
     #[account(mut)]
     pub admin: Signer<'info>,
 }
 
-/// Trigger one recurring-delegation pull.
-///
-/// The program is a *verified signer proxy*: it checks the gate (signer is in
-/// the config's puller-key list, CPI target is the configured native
-/// Subscriptions program), then forwards the caller-supplied native pull
-/// instruction, signing as the `MeshDelegate` PDA via `invoke_signed`. The
-/// native program still enforces all of its own invariants
-/// (`amount_per_period` cap, period rollover, expiry, delegatee-must-sign).
-///
-/// `remaining_accounts` MUST be the exact ordered account list the native
-/// `pull` instruction expects, and MUST include the `MeshDelegate` PDA (it is
-/// force-marked as signer here). `native_data` is the pre-encoded native
-/// `pull` instruction data.
+/// Forward a native pull, signing as MeshDelegate. remaining_accounts must
+/// match the native account order and include MeshDelegate; native_data is pre-encoded.
 #[derive(Accounts)]
 pub struct Pull<'info> {
-    /// CHECK: The `MeshDelegate` PDA; validated by seeds. Signs the native pull
-    /// via `invoke_signed`. Must also be present in `remaining_accounts`.
+    /// CHECK: Validated by seeds; must also appear in remaining_accounts.
     #[account(seeds = [DELEGATE_SEED], bump)]
     pub delegate: UncheckedAccount<'info>,
 
-    /// Operational key authorizing this pull (and paying the tx fee). Must be
-    /// listed in `config.puller_keys` (checked in the handler).
     pub puller_key: Signer<'info>,
 
     /// CHECK: verified to equal `SUBSCRIPTIONS_PROGRAM`; used as the CPI target.
     #[account(address = SUBSCRIPTIONS_PROGRAM @ ControllerError::WrongTargetProgram)]
     pub subscriptions_program: UncheckedAccount<'info>,
 
-    /// The on-chain puller-key allowlist.
     #[account(seeds = [CONFIG_SEED], bump)]
     pub config: Account<'info, Config>,
 }
@@ -153,8 +116,6 @@ pub struct Pull<'info> {
 pub mod subscription_controller {
     use super::*;
 
-    /// One-time setup: create the config with the initial puller-key list.
-    /// The signer becomes the admin. Cannot be called twice (`init`).
     pub fn initialize(ctx: Context<Initialize>, puller_keys: Vec<Pubkey>) -> Result<()> {
         require!(
             puller_keys.len() <= MAX_PULLER_KEYS,
@@ -167,8 +128,7 @@ pub mod subscription_controller {
         Ok(())
     }
 
-    /// Admin: replace the puller-key list. Rotation = list old+new, then
-    /// remove old. Kill switch = empty list. One transaction; no upgrade.
+    /// Empty disables pulls; include old and new keys during rotation.
     pub fn set_puller_keys(ctx: Context<AdminAction>, puller_keys: Vec<Pubkey>) -> Result<()> {
         require!(
             puller_keys.len() <= MAX_PULLER_KEYS,
@@ -178,17 +138,12 @@ pub mod subscription_controller {
         Ok(())
     }
 
-    /// Admin: propose a new admin (step 1 of 2). Nothing changes until the
-    /// proposed key calls `accept_admin`, so a typo cannot brick the config —
-    /// re-propose to correct it. Pass `Pubkey::default()` to cancel a pending
-    /// handover.
+    /// Propose a handover, or pass Pubkey::default() to cancel one.
     pub fn propose_admin(ctx: Context<AdminAction>, new_admin: Pubkey) -> Result<()> {
         ctx.accounts.config.pending_admin = new_admin;
         Ok(())
     }
 
-    /// Pending admin: accept the handover (step 2 of 2). Signed by the
-    /// proposed key, proving it is controllable before it gains power.
     pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
         let config = &mut ctx.accounts.config;
         config.admin = ctx.accounts.new_admin.key();
@@ -196,22 +151,15 @@ pub mod subscription_controller {
         Ok(())
     }
 
-    /// Admin: close the config account and reclaim its rent (teardown only —
-    /// afterwards `pull` fails until a new config is initialized). Do this
-    /// while the program is still live; closing the program first orphans the
-    /// config's rent.
+    /// Close before undeploying the program, or the config rent becomes stranded.
     pub fn close_config(_ctx: Context<CloseConfig>) -> Result<()> {
         Ok(())
     }
 
-    /// Puller key: gate + forward one native pull, signing as `MeshDelegate`.
     pub fn pull<'info>(
         ctx: Context<'info, Pull<'info>>,
         native_data: Vec<u8>,
     ) -> Result<()> {
-        // Authorization: the signer must be listed in the config. An empty
-        // list authorizes no one, which is the kill switch ("pause").
-        // Target-program identity is enforced by the `address =` constraint.
         require!(
             ctx.accounts
                 .config
@@ -220,18 +168,13 @@ pub mod subscription_controller {
             ControllerError::Unauthorized
         );
 
-        // Forward ONLY the native recurring pull_payment (pin its single-byte
-        // discriminator + exact length). A puller key therefore cannot invoke
-        // any other native instruction as the delegatee. Destination/amount
-        // within pull_payment stay caller-chosen (accepted design tradeoff).
+        // Restrict the delegate signature to pull_payment; destination remains caller-supplied.
         require!(
             native_data.first() == Some(&NATIVE_PULL_DISCRIMINATOR)
                 && native_data.len() == NATIVE_PULL_DATA_LEN,
             ControllerError::UnexpectedNativeInstruction
         );
 
-        // Build the CPI instruction from the forwarded accounts, force-signing
-        // the MeshDelegate PDA.
         let delegate_key = ctx.accounts.delegate.key();
         let metas: Vec<AccountMeta> = ctx
             .remaining_accounts
@@ -249,8 +192,7 @@ pub mod subscription_controller {
             data: native_data,
         };
 
-        // `invoke_signed` needs AccountInfos for every account referenced by
-        // the instruction plus the target program account.
+        // CPI requires the target program AccountInfo as well as its instruction accounts.
         let mut infos = ctx.remaining_accounts.to_vec();
         infos.push(ctx.accounts.subscriptions_program.to_account_info());
 
