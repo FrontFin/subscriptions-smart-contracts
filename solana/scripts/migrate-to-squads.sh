@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
-# One-time migration of an env's TWO authorities to a Squads vault:
-#   1. the program's upgrade authority  (solana program set-upgrade-authority)
-#   2. the config admin                 (controller propose_admin, then the
-#      vault executes accept_admin — the handover is two-step)
-# Signed by the CURRENT authority wallet (key pasted at the prompt — the last
-# time it is ever needed). Afterwards: upgrades via scripts/stage-upgrade.sh,
-# key changes via scripts/set-puller-keys.sh <env> --print — both approved in
-# the Squads app.
-#
+# Transfer upgrade authority and propose config-admin handover; the vault must accept admin.
 # Usage: scripts/migrate-to-squads.sh <local|dev|prod> <vault-address>
 set -euo pipefail
 cd "$(dirname "$0")/.."

@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# Undeploy an env's program, refunding its rent deposit — signed by the
-# authority wallet IN THE BROWSER (one popup). No key pasted or stored.
-#
-# ⚠️ IRREVERSIBLE: a closed program id is burned forever. On success this
-# script unpins PROGRAM_ID from the env's .env, so the env's next deploy
-# mints a fresh id → new MeshDelegate PDA (existing delegations die with the
-# old one; update the backend's SmartContractAddress).
-#
-# Usage: scripts/close.sh <local|dev|prod> [recipient-pubkey]  (default: the wallet)
+# Closing burns the program ID; redeployment changes the PDA and invalidates old delegations.
+# Usage: scripts/close.sh <local|dev|prod> [recipient-pubkey] (default: wallet)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/_env.sh
@@ -29,16 +22,13 @@ echo "This permanently burns the program id (it can never be redeployed)."
 read -rp "Type 'close' to proceed: " CONFIRM
 [[ "$CONFIRM" == "close" ]] || { echo "aborted"; exit 1; }
 
-# First reclaim the config account's rent, while the program is still live
-# (closing the program first would orphan it). Signed by the CURRENT on-chain
-# admin — which may differ from the upgrade authority after a handover.
+# Close config before the program to recover its rent; its admin may differ from upgrade authority.
 CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null \
   | awk '$1=="admin"{print $3}')
 if [[ -n "$CONFIG_ADMIN" ]]; then
   CB64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$CONFIG_ADMIN" "$RPC_URL" close-config \
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
-  # Simulate first: skip gracefully (no scary popup) if the deployed program
-  # predates `close_config`, or the config is already gone.
+  # Skip absent configs and deployments predating close_config.
   SIM_ERR=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"simulateTransaction\",\"params\":[\"$CB64\",{\"sigVerify\":false,\"replaceRecentBlockhash\":true,\"encoding\":\"base64\"}]}" \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['value']['err'])" 2>/dev/null)
@@ -71,11 +61,7 @@ while true; do
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || { echo "aborted"; exit 1; }
 done
 
-# Rename into place instead of truncating the original. This runs after the
-# program id has already been burned, so a write interrupted here would leave
-# an empty file and destroy the only remaining record of the environment. The
-# temp file sits beside the target so the rename is atomic, and is copied first
-# so it inherits the original's mode.
+# Rename a sibling temp file atomically, preserving the original mode and avoiding truncation.
 SCRUBBED="scripts/envs/$ENV.env.tmp.$$"
 trap 'rm -f "$SCRUBBED"' EXIT
 cp -p "scripts/envs/$ENV.env" "$SCRUBBED"

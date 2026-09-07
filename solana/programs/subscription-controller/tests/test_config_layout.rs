@@ -1,14 +1,4 @@
-//! Byte-layout guards for the on-chain `Config` account.
-//!
-//! `Config` is live on two mainnet programs. Borsh deserializes positionally,
-//! so any change to the field order, to a field's type, or to `SPACE` misreads
-//! the deployed accounts instead of failing loudly.
-//!
-//! These are pure host-side assertions with no `include_bytes!`, so they run
-//! without an SBF toolchain: `cargo test --test test_config_layout`.
-//!
-//! If one of these goes red, do NOT update the literals to match. The literals
-//! describe accounts that already exist on chain and cannot be rewritten.
+//! Deployed Config layout: changing these literals requires an account migration.
 
 use {
     anchor_lang::{prelude::Pubkey, AccountSerialize, Discriminator},

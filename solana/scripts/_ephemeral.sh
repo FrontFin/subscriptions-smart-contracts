@@ -1,20 +1,11 @@
-# Sourced helper — temporary fee payer funded FROM THE AUTHORITY WALLET, so
-# the wallet is the only funded wallet you maintain. Flow:
-#   1. mint a throwaway keypair (temp file, auto-removed on exit);
-#   2. one browser popup: the wallet funds it with the needed working capital;
-#   3. the throwaway does the mechanical signing (buffer writes etc.);
-#   4. on exit — success, error, or Ctrl-C — every leftover lamport is swept
-#      back to the wallet automatically.
-# Override: set FEE_PAYER=<keypair path> to use a standing hot key instead
-# (skips the funding popup and the sweep).
+# Browser-funded temporary payer; sweep leftovers on exit. FEE_PAYER skips funding and sweep.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_secrets.sh"
 
 EPHEMERAL=""
 _EPH_SWEEP_TO=""
 _EPH_URL="mainnet-beta"
 
-# Takes the throwaway keypair off the deletion list, so a funded key that
-# could not be swept survives `_secrets_cleanup`.
+# Retain the key if its balance could not be swept.
 _eph_keep_payer_keypair() {
   local kept=()
   local file
@@ -26,8 +17,7 @@ _eph_keep_payer_keypair() {
 
 _eph_cleanup() {
   if [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" && -n "$_EPH_SWEEP_TO" ]]; then
-    # A failed balance read must not abort the trap: an unknown balance is
-    # treated as "possibly funded" and swept anyway.
+    # An RPC failure leaves the balance unknown; still attempt the sweep.
     local bal=""
     bal=$(solana balance -k "$EPHEMERAL" -u "$_EPH_URL" 2>/dev/null | awk '{print $1}') || bal=""
     if [[ "$bal" != "0" ]]; then
@@ -55,9 +45,7 @@ _eph_cleanup() {
   _secrets_cleanup
 }
 
-# ephemeral_payer <authority-pubkey> <lamports> <rpc-http-url>
-# Sets PAYER_FILE. If FEE_PAYER is set in the environment, uses it directly
-# (no popup, no sweep); otherwise mints + browser-funds a throwaway.
+# ephemeral_payer <authority-pubkey> <lamports> <rpc-url>; sets PAYER_FILE.
 ephemeral_payer() {
   local authority="$1" lamports="$2" rpc="$3"
   if [[ -n "${FEE_PAYER:-}" ]]; then
