@@ -41,8 +41,7 @@ except ValueError:
 if len(raw) != 64:
     sys.exit(f'error: decoded to {len(raw)} bytes, expected a 64-byte ed25519 secret key')
 
-# The trailing 32 bytes are only the key's CLAIM about its public half.
-# Re-deriving from the seed is what turns that claim into a check.
+# Derive from the seed: the stored public half is untrusted.
 derived = Ed25519PrivateKey.from_private_bytes(raw[:32]).public_key().public_bytes_raw()
 pubkey = b58encode(derived)
 claimed = b58encode(raw[32:])

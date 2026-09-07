@@ -151,10 +151,7 @@ def main() -> None:
         sys.exit("error: unsigned transaction is not valid base64")
     if not looks_like_base58_pubkey(expected_signer):
         sys.exit(f"error: expected-signer-pubkey is not base58: {expected_signer!r}")
-    # Anything on this machine can reach a localhost port, and a page in the
-    # browser can POST to one cross-origin. The unguessable path keeps the
-    # unsigned transaction from being read, and the custom header forces a
-    # CORS preflight that is never answered, so only our own page can report.
+    # The secret path protects the transaction; the custom header forces a CORS preflight.
     token = secrets.token_urlsafe(24)
     token_path = f"/{token}"
     done_path = f"{token_path}/done"
@@ -169,8 +166,7 @@ def main() -> None:
     reports = queue.Queue()
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        # Idle-recv timeout: it restarts on every byte, so it only drops a
-        # socket that goes fully silent.
+        # Per-read timeout; incoming bytes reset it.
         timeout = 10
 
         def do_GET(self):
