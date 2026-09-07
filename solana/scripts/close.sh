@@ -29,32 +29,60 @@ echo "This permanently burns the program id (it can never be redeployed)."
 read -rp "Type 'close' to proceed: " CONFIRM
 [[ "$CONFIRM" == "close" ]] || { echo "aborted"; exit 1; }
 
-# First reclaim the config account's rent, while the program is still live
-# (closing the program first would orphan it). Signed by the CURRENT on-chain
-# admin — which may differ from the upgrade authority after a handover.
+# reclaim_rent <admin-cli command> <label> <rent> — build, simulate, and (if
+# the simulation is clean) browser-sign one rent-reclaiming close. Simulating
+# first skips gracefully, with no scary popup, when the deployed program has no
+# such instruction or the account is already gone.
+reclaim_rent() {
+  local cli_command="$1" label="$2" rent="$3"
+  local b64 sim_err sig
+  b64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$CONFIG_ADMIN" "$RPC_URL" "$cli_command" \
+        | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
+  if [[ -z "$b64" ]]; then
+    echo "could not build the $label close — skipping; $rent orphaned." >&2
+    return 0
+  fi
+  sim_err=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"simulateTransaction\",\"params\":[\"$b64\",{\"sigVerify\":false,\"replaceRecentBlockhash\":true,\"encoding\":\"base64\"}]}" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['value']['err'])" 2>/dev/null)
+  if [[ "$sim_err" != "None" ]]; then
+    echo "$label rent reclaim unavailable (deployed program has no $cli_command, or the account is already gone) — skipping; $rent orphaned."
+    return 0
+  fi
+  echo "reclaiming $label rent (admin $CONFIG_ADMIN)..."
+  if ! sig=$(python3 scripts/sign_in_browser.py "$b64" "$CONFIG_ADMIN"); then
+    echo "⚠️  $label close was not signed — its rent ($rent) is still on chain." >&2
+    return 1
+  fi
+  if ! solana confirm "$sig" --url "$URL" >/dev/null 2>&1; then
+    echo "⚠️  $label close $sig did not confirm — its rent ($rent) is still on chain." >&2
+    return 1
+  fi
+  echo "$label closed: $sig"
+}
+
+# First reclaim the account rents, while the program is still live (closing the
+# program first would orphan them). Signed by the CURRENT on-chain admin —
+# which may differ from the upgrade authority after a handover. The destination
+# registry MUST go first: closing it reads the config to check the admin, so
+# once the config is gone the registry can never be closed.
 CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null \
   | awk '$1=="admin"{print $3}')
 if [[ -n "$CONFIG_ADMIN" ]]; then
-  CB64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$CONFIG_ADMIN" "$RPC_URL" close-config \
-        | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
-  # Simulate first: skip gracefully (no scary popup) if the deployed program
-  # predates `close_config`, or the config is already gone.
-  SIM_ERR=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"simulateTransaction\",\"params\":[\"$CB64\",{\"sigVerify\":false,\"replaceRecentBlockhash\":true,\"encoding\":\"base64\"}]}" \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['value']['err'])" 2>/dev/null)
-  if [[ "$SIM_ERR" == "None" ]]; then
-    echo "reclaiming config rent (admin $CONFIG_ADMIN)..."
-    if CSIG=$(python3 scripts/sign_in_browser.py "$CB64" "$CONFIG_ADMIN"); then
-      echo "config closed: $CSIG"
-      solana confirm "$CSIG" --url "$URL" >/dev/null 2>&1 || true
-    else
-      echo "⚠️  config close not signed — its rent (~0.0035 SOL) will be orphaned." >&2
-    fi
-  else
-    echo "config-rent reclaim unavailable (deployed program has no close_config, or config already gone) — skipping; ~0.0035 SOL orphaned."
+  # Closing the config while the registry is still there strands the registry
+  # for good, on a program id this script is about to burn. A registry close
+  # that was attempted and did not land therefore stops the teardown.
+  if ! reclaim_rent close-registry "destination registry" "~0.0043 SOL"; then
+    echo >&2
+    echo "🛑 aborting the teardown: the destination registry is still on chain." >&2
+    echo "   Closing the config now would make it unclosable forever, and the" >&2
+    echo "   program id is burned a few lines below. Nothing has been destroyed —" >&2
+    echo "   re-run scripts/close.sh $ENV once the registry close goes through." >&2
+    exit 1
   fi
+  reclaim_rent close-config "config" "~0.0035 SOL" || true
 else
-  echo "no config found on-chain — skipping config-rent reclaim."
+  echo "no config found on-chain — skipping the rent reclaims (without a config the registry cannot be closed either)."
 fi
 
 while true; do

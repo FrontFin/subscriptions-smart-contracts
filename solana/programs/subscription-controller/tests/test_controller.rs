@@ -14,15 +14,18 @@
 use {
     anchor_lang::{
         prelude::Pubkey,
-        solana_program::instruction::Instruction,
-        InstructionData, ToAccountMetas,
+        solana_program::instruction::{AccountMeta, Instruction},
+        AnchorDeserialize, Discriminator, InstructionData, ToAccountMetas,
     },
     litesvm::LiteSVM,
     solana_keypair::Keypair,
     solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
     solana_transaction::versioned::VersionedTransaction,
-    subscription_controller::{CONFIG_SEED, DELEGATE_SEED, SUBSCRIPTIONS_PROGRAM},
+    subscription_controller::{
+        PullExecuted, CONFIG_SEED, DELEGATE_SEED, DESTINATIONS_SEED, MAX_DESTINATIONS,
+        SUBSCRIPTIONS_PROGRAM,
+    },
 };
 
 /// Two puller keypairs the suite signs with. Derived from fixed, public
@@ -40,6 +43,7 @@ struct Env {
     program_id: Pubkey,
     delegate: Pubkey,
     config: Pubkey,
+    destination_registry: Pubkey,
     program_data: Pubkey,
     admin: Keypair,
     pullers: [Keypair; 2],
@@ -92,6 +96,56 @@ fn propose_admin_ix(env: &Env, admin: Pubkey, new_admin: Pubkey) -> Instruction 
     )
 }
 
+fn initialize_destinations_ix(
+    env: &Env,
+    admin: Pubkey,
+    destination_owners: Vec<Pubkey>,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::InitializeDestinationRegistry { destination_owners }
+            .data(),
+        subscription_controller::accounts::InitializeDestinationRegistry {
+            config: env.config,
+            destination_registry: env.destination_registry,
+            admin,
+            system_program: anchor_lang::system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn set_destination_owners_ix(
+    env: &Env,
+    admin: Pubkey,
+    destination_owners: Vec<Pubkey>,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::SetDestinationOwners { destination_owners }.data(),
+        subscription_controller::accounts::SetDestinationOwners {
+            config: env.config,
+            destination_registry: env.destination_registry,
+            admin,
+            system_program: anchor_lang::system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn close_destination_registry_ix(env: &Env, admin: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::CloseDestinationRegistry {}.data(),
+        subscription_controller::accounts::CloseDestinationRegistry {
+            config: env.config,
+            destination_registry: env.destination_registry,
+            admin,
+        }
+        .to_account_metas(None),
+    )
+}
+
 fn accept_admin_ix(env: &Env, new_admin: Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         env.program_id,
@@ -104,9 +158,21 @@ fn accept_admin_ix(env: &Env, new_admin: Pubkey) -> Instruction {
     )
 }
 
-/// Fresh SVM with the program loaded and the config initialized to the two
-/// fixture puller keys (admin = a funded throwaway keypair).
+/// Fresh SVM with the program loaded, the config initialized to the two
+/// fixture puller keys, and the destination registry created EMPTY (nothing is
+/// payable until a test allowlists an owner).
 fn setup() -> Env {
+    let mut env = setup_without_destination_registry();
+    let admin = env.admin.insecure_clone();
+    let ix = initialize_destinations_ix(&env, admin.pubkey(), vec![]);
+    send(&mut env, ix, &admin, &[&admin]).expect("initialize destination registry");
+    env
+}
+
+/// Everything `setup` does except creating the registry — the state the live
+/// programs are in the moment the upgraded binary lands, when every pull must
+/// be denied.
+fn setup_without_destination_registry() -> Env {
     let program_id = subscription_controller::id();
     let mut svm = LiteSVM::new();
 
@@ -116,6 +182,7 @@ fn setup() -> Env {
     let pullers = fixture_puller_keypairs();
     let (delegate, _) = Pubkey::find_program_address(&[DELEGATE_SEED], &program_id);
     let (config, _) = Pubkey::find_program_address(&[CONFIG_SEED], &program_id);
+    let (destination_registry, _) = Pubkey::find_program_address(&[DESTINATIONS_SEED], &program_id);
 
     let admin = Keypair::new();
     svm.airdrop(&admin.pubkey(), 1_000_000_000).unwrap();
@@ -148,6 +215,7 @@ fn setup() -> Env {
         program_id,
         delegate,
         config,
+        destination_registry,
         program_data,
         admin: admin.insecure_clone(),
         pullers,
@@ -176,6 +244,7 @@ fn pull_ix_data(
             puller_key,
             subscriptions_program,
             config: env.config,
+            destination_registry: env.destination_registry,
         }
         .to_account_metas(None),
     )
@@ -187,10 +256,55 @@ fn send(
     fee_payer: &Keypair,
     signers: &[&Keypair],
 ) -> Result<(), litesvm::types::FailedTransactionMetadata> {
+    send_for_meta(env, ix, fee_payer, signers).map(|_| ())
+}
+
+fn send_for_meta(
+    env: &mut Env,
+    ix: Instruction,
+    fee_payer: &Keypair,
+    signers: &[&Keypair],
+) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata> {
     let blockhash = env.svm.latest_blockhash();
     let msg = Message::new_with_blockhash(&[ix], Some(&fee_payer.pubkey()), &blockhash);
     let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), signers).unwrap();
-    env.svm.send_transaction(tx).map(|_| ())
+    env.svm.send_transaction(tx)
+}
+
+/// `emit!` writes the event as a `sol_log_data` line, so the only way to read
+/// it back is to decode the base64 payload the runtime prints. Hand-rolled
+/// because the crate has no base64 dev-dependency.
+fn decode_base64(input: &str) -> Vec<u8> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    for byte in input.trim().bytes() {
+        if byte == b'=' {
+            break;
+        }
+        let value = ALPHABET
+            .iter()
+            .position(|c| *c == byte)
+            .unwrap_or_else(|| panic!("not base64: {input}")) as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xFF) as u8);
+        }
+    }
+    out
+}
+
+fn pull_event(logs: &[String]) -> PullExecuted {
+    let data = logs
+        .iter()
+        .filter_map(|line| line.strip_prefix("Program data: "))
+        .map(decode_base64)
+        .find(|bytes| bytes.starts_with(PullExecuted::DISCRIMINATOR))
+        .expect("pull must emit a PullExecuted event");
+    PullExecuted::try_from_slice(&data[8..]).expect("PullExecuted decodes")
 }
 
 // ---------------------------------------------------------------------------
@@ -823,13 +937,13 @@ mod native {
         delegator: &Pubkey,
         delegatee: &Pubkey,
         mint: &Pubkey,
-        destination_owner: &Pubkey,
+        destination: &Pubkey,
     ) -> Vec<AccountMeta> {
         vec![
             AccountMeta::new(*delegation, false),
             AccountMeta::new_readonly(subscription_authority(delegator, mint), false),
             AccountMeta::new(ata(delegator, mint), false),
-            AccountMeta::new(ata(destination_owner, mint), false),
+            AccountMeta::new(*destination, false),
             AccountMeta::new_readonly(*mint, false),
             AccountMeta::new_readonly(token_program(), false),
             AccountMeta::new_readonly(*delegatee, false),
@@ -930,6 +1044,10 @@ fn pull_moves_funds_end_to_end_via_native_program() {
 
     // Pull through the controller: puller key signs; the program signs the
     // native pull as the MeshDelegate PDA.
+    let admin = env.admin.insecure_clone();
+    let allow_ix = set_destination_owners_ix(&env, admin.pubkey(), vec![merchant]);
+    send(&mut env, allow_ix, &admin, &[&admin]).expect("admin allowlists the merchant");
+
     let native_data =
         native::pull_payment_data(AMOUNT_PER_PERIOD, &delegator.pubkey(), &mint);
     let mut metas = subscription_controller::accounts::Pull {
@@ -937,6 +1055,7 @@ fn pull_moves_funds_end_to_end_via_native_program() {
         puller_key: puller.pubkey(),
         subscriptions_program: SUBSCRIPTIONS_PROGRAM,
         config: env.config,
+        destination_registry: env.destination_registry,
     }
     .to_account_metas(None);
     metas.extend(native::pull_payment_metas(
@@ -944,7 +1063,7 @@ fn pull_moves_funds_end_to_end_via_native_program() {
         &delegator.pubkey(),
         &env.delegate,
         &mint,
-        &merchant,
+        &dest_ata,
     ));
     let ix = Instruction::new_with_bytes(
         env.program_id,
@@ -1072,12 +1191,17 @@ fn dust_pulls_consume_only_their_own_amount() {
     let delegation =
         native::recurring_delegation(&authority, &delegator_key, &env.delegate, nonce);
 
+    let admin = env.admin.insecure_clone();
+    let allow_ix = set_destination_owners_ix(&env, admin.pubkey(), vec![merchant]);
+    send(&mut env, allow_ix, &admin, &[&admin]).expect("admin allowlists the merchant");
+
     let program_id = env.program_id;
     let mut metas = subscription_controller::accounts::Pull {
         delegate: env.delegate,
         puller_key: puller.pubkey(),
         subscriptions_program: SUBSCRIPTIONS_PROGRAM,
         config: env.config,
+        destination_registry: env.destination_registry,
     }
     .to_account_metas(None);
     metas.extend(native::pull_payment_metas(
@@ -1085,7 +1209,7 @@ fn dust_pulls_consume_only_their_own_amount() {
         &delegator_key,
         &env.delegate,
         &mint,
-        &merchant,
+        &dest_ata,
     ));
     let pull_of = |amount: u64| {
         Instruction::new_with_bytes(
@@ -1129,4 +1253,756 @@ fn dust_pulls_consume_only_their_own_amount() {
         &[&puller],
     )
     .expect("dust must not burn the rest of the period's allowance");
+}
+
+// ---------------------------------------------------------------------------
+// Destination allowlist. The controller proves where the money went by reading
+// the token balances back AFTER the CPI, so none of these tests can be
+// satisfied by re-ordering or padding the account list.
+// ---------------------------------------------------------------------------
+
+const NATIVE_DECIMALS: u8 = 6;
+const NATIVE_FUNDED: u64 = 100_000_000;
+const NATIVE_AMOUNT_PER_PERIOD: u64 = 50_000_000;
+
+struct NativeEnv {
+    env: Env,
+    puller: Keypair,
+    delegator: Keypair,
+    mint: Pubkey,
+    merchant: Pubkey,
+    source_ata: Pubkey,
+    dest_ata: Pubkey,
+    delegation: Pubkey,
+}
+
+fn write_token_account(env: &mut Env, address: Pubkey, data: Vec<u8>) {
+    env.svm
+        .set_account(
+            address,
+            solana_account::Account {
+                lamports: 10_000_000,
+                data,
+                owner: native::token_program(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+}
+
+fn token_balance(env: &Env, address: &Pubkey) -> u64 {
+    native::token_amount(&env.svm.get_account(address).expect("token account").data)
+}
+
+/// A live delegation against the real native program: funded source ATA, empty
+/// merchant ATA, registry present but still empty.
+fn setup_native() -> NativeEnv {
+    use anchor_lang::solana_program::clock::Clock;
+
+    let mut env = setup();
+    env.svm
+        .add_program(
+            SUBSCRIPTIONS_PROGRAM,
+            include_bytes!("fixtures/subscriptions_program.so"),
+        )
+        .unwrap();
+
+    #[allow(deprecated)]
+    let mainnet_rent = anchor_lang::solana_program::rent::Rent {
+        lamports_per_byte_year: 3480,
+        exemption_threshold: 1.0,
+        burn_percent: 50,
+    };
+    env.svm.set_sysvar(&mainnet_rent);
+
+    let puller = env.pullers[0].insecure_clone();
+    let delegator = Keypair::new();
+    let merchant = Pubkey::new_unique();
+    env.svm.airdrop(&puller.pubkey(), 10_000_000_000).unwrap();
+    env.svm.airdrop(&delegator.pubkey(), 10_000_000_000).unwrap();
+
+    let mint = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let source_ata = native::ata(&delegator.pubkey(), &mint);
+    let dest_ata = native::ata(&merchant, &mint);
+    write_token_account(
+        &mut env,
+        mint,
+        native::mint_account_data(&mint_authority, NATIVE_FUNDED, NATIVE_DECIMALS),
+    );
+    write_token_account(
+        &mut env,
+        source_ata,
+        native::token_account_data(&mint, &delegator.pubkey(), NATIVE_FUNDED),
+    );
+    write_token_account(
+        &mut env,
+        dest_ata,
+        native::token_account_data(&mint, &merchant, 0),
+    );
+
+    let init_ix = native::initialize_authority_ix(&delegator.pubkey(), &mint);
+    send(&mut env, init_ix, &delegator, &[&delegator]).expect("initialize_authority");
+
+    let authority = native::subscription_authority(&delegator.pubkey(), &mint);
+    let authority_account = env.svm.get_account(&authority).expect("authority created");
+    let init_id = i64::from_le_bytes(authority_account.data[98..106].try_into().unwrap());
+
+    let clock: Clock = env.svm.get_sysvar();
+    let nonce = 1u64;
+    let create_ix = native::create_delegation_ix(
+        &delegator.pubkey(),
+        &env.delegate,
+        &mint,
+        nonce,
+        NATIVE_AMOUNT_PER_PERIOD,
+        3600,
+        clock.unix_timestamp,
+        clock.unix_timestamp + 30 * 86_400,
+        init_id,
+    );
+    send(&mut env, create_ix, &delegator, &[&delegator]).expect("create_recurring_delegation");
+    let delegation =
+        native::recurring_delegation(&authority, &delegator.pubkey(), &env.delegate, nonce);
+
+    NativeEnv {
+        env,
+        puller,
+        delegator,
+        mint,
+        merchant,
+        source_ata,
+        dest_ata,
+        delegation,
+    }
+}
+
+fn allowlist(fixture: &mut NativeEnv, destination_owners: Vec<Pubkey>) {
+    let admin = fixture.env.admin.insecure_clone();
+    let ix = set_destination_owners_ix(&fixture.env, admin.pubkey(), destination_owners);
+    send(&mut fixture.env, ix, &admin, &[&admin]).expect("admin sets the destination owners");
+}
+
+/// A pull whose native destination slot is `destination`, with `padding`
+/// appended AFTER the native account list: extra accounts a caller can add
+/// freely, which the controller must not be fooled by.
+fn native_pull_ix(
+    fixture: &NativeEnv,
+    amount: u64,
+    destination: Pubkey,
+    padding: &[Pubkey],
+) -> Instruction {
+    let env = &fixture.env;
+    let mut metas = subscription_controller::accounts::Pull {
+        delegate: env.delegate,
+        puller_key: fixture.puller.pubkey(),
+        subscriptions_program: SUBSCRIPTIONS_PROGRAM,
+        config: env.config,
+        destination_registry: env.destination_registry,
+    }
+    .to_account_metas(None);
+    metas.extend(native::pull_payment_metas(
+        &fixture.delegation,
+        &fixture.delegator.pubkey(),
+        &env.delegate,
+        &fixture.mint,
+        &destination,
+    ));
+    for account in padding {
+        metas.push(AccountMeta::new(*account, false));
+    }
+    Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::Pull {
+            native_data: native::pull_payment_data(
+                amount,
+                &fixture.delegator.pubkey(),
+                &fixture.mint,
+            ),
+        }
+        .data(),
+        metas,
+    )
+}
+
+#[test]
+fn pull_succeeds_for_an_allowlisted_merchant_and_reports_the_received_amount() {
+    let mut fixture = setup_native();
+    let merchant = fixture.merchant;
+    allowlist(&mut fixture, vec![merchant]);
+
+    let puller = fixture.puller.insecure_clone();
+    let ix = native_pull_ix(&fixture, NATIVE_AMOUNT_PER_PERIOD, fixture.dest_ata, &[]);
+    let meta = send_for_meta(&mut fixture.env, ix, &puller, &[&puller])
+        .expect("an allowlisted merchant's canonical ATA must still be payable");
+
+    assert_eq!(
+        token_balance(&fixture.env, &fixture.dest_ata),
+        NATIVE_AMOUNT_PER_PERIOD
+    );
+
+    let event = pull_event(&meta.logs);
+    assert_eq!(event.puller, puller.pubkey());
+    assert_eq!(event.delegation, fixture.delegation);
+    assert_eq!(event.delegator, fixture.delegator.pubkey());
+    assert_eq!(event.mint, fixture.mint);
+    assert_eq!(event.destination, fixture.dest_ata);
+    assert_eq!(
+        event.destination_owner, fixture.merchant,
+        "the event must carry the owner read back from the credited account"
+    );
+    assert_eq!(
+        event.amount, NATIVE_AMOUNT_PER_PERIOD,
+        "the event must report the RECEIVED amount, not the requested one"
+    );
+}
+
+#[test]
+fn pull_is_rejected_when_the_destination_owner_is_not_allowlisted() {
+    // Registry created but empty: the transaction that works above now pays
+    // nobody. This is a second, finer kill switch.
+    let mut fixture = setup_native();
+    let puller = fixture.puller.insecure_clone();
+
+    let ix = native_pull_ix(&fixture, NATIVE_AMOUNT_PER_PERIOD, fixture.dest_ata, &[]);
+    let err = send(&mut fixture.env, ix, &puller, &[&puller])
+        .expect_err("an empty destination registry must pay nobody");
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains("DestinationOwnerNotAllowlisted"),
+        "expected DestinationOwnerNotAllowlisted, got:\n{logs}"
+    );
+    assert_eq!(token_balance(&fixture.env, &fixture.dest_ata), 0);
+    assert_eq!(
+        token_balance(&fixture.env, &fixture.source_ata),
+        NATIVE_FUNDED
+    );
+}
+
+#[test]
+fn pull_is_rejected_for_a_non_canonical_account_that_names_an_allowlisted_owner() {
+    // InitializeAccount3 takes the owner as an instruction PARAMETER and needs
+    // no signature from it, so anyone can create a token account whose owner
+    // field names a real merchant, and then spend from it. Only that owner's
+    // canonical ATA is accepted.
+    let mut fixture = setup_native();
+    let merchant = fixture.merchant;
+    allowlist(&mut fixture, vec![merchant]);
+
+    let impostor = Pubkey::new_unique();
+    assert_ne!(impostor, native::ata(&fixture.merchant, &fixture.mint));
+    write_token_account(
+        &mut fixture.env,
+        impostor,
+        native::token_account_data(&fixture.mint, &fixture.merchant, 0),
+    );
+
+    let puller = fixture.puller.insecure_clone();
+    let ix = native_pull_ix(&fixture, NATIVE_AMOUNT_PER_PERIOD, impostor, &[]);
+    let err = send(&mut fixture.env, ix, &puller, &[&puller])
+        .expect_err("a spoofed owner field must not make an account payable");
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains("DestinationIsNotCanonicalAta"),
+        "expected DestinationIsNotCanonicalAta. If this instead failed inside the \
+         native program, then the native program already constrains the destination \
+         and the ATA leg of this check is redundant. Got:\n{logs}"
+    );
+    assert_eq!(token_balance(&fixture.env, &impostor), 0);
+}
+
+#[test]
+fn pull_is_rejected_when_the_destination_is_the_source() {
+    // Nothing gains balance, so there is no account to attribute the payout to.
+    let mut fixture = setup_native();
+    let merchant = fixture.merchant;
+    let delegator_key = fixture.delegator.pubkey();
+    allowlist(&mut fixture, vec![merchant, delegator_key]);
+
+    let puller = fixture.puller.insecure_clone();
+    let ix = native_pull_ix(&fixture, NATIVE_AMOUNT_PER_PERIOD, fixture.source_ata, &[]);
+    let err = send(&mut fixture.env, ix, &puller, &[&puller])
+        .expect_err("a pull that credits nothing must not be accepted");
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains("NoDestinationCredited"),
+        "expected NoDestinationCredited, got:\n{logs}"
+    );
+    assert_eq!(
+        token_balance(&fixture.env, &fixture.source_ata),
+        NATIVE_FUNDED
+    );
+}
+
+#[test]
+fn padding_the_account_list_with_an_allowlisted_ata_does_not_launder_the_destination() {
+    // The merchant's real ATA is in the account list but is never credited;
+    // the money goes to an attacker's own canonical ATA. Indexing the account
+    // list would accept this. A balance delta does not.
+    let mut fixture = setup_native();
+    let merchant = fixture.merchant;
+    allowlist(&mut fixture, vec![merchant]);
+
+    let attacker = Pubkey::new_unique();
+    let attacker_ata = native::ata(&attacker, &fixture.mint);
+    write_token_account(
+        &mut fixture.env,
+        attacker_ata,
+        native::token_account_data(&fixture.mint, &attacker, 0),
+    );
+
+    let puller = fixture.puller.insecure_clone();
+    let ix = native_pull_ix(
+        &fixture,
+        NATIVE_AMOUNT_PER_PERIOD,
+        attacker_ata,
+        &[fixture.dest_ata],
+    );
+    let err = send(&mut fixture.env, ix, &puller, &[&puller])
+        .expect_err("a decoy merchant account must not authorize a payout elsewhere");
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains("DestinationOwnerNotAllowlisted"),
+        "expected DestinationOwnerNotAllowlisted, got:\n{logs}"
+    );
+    assert_eq!(token_balance(&fixture.env, &attacker_ata), 0);
+    assert_eq!(token_balance(&fixture.env, &fixture.dest_ata), 0);
+}
+
+#[test]
+fn pull_is_rejected_when_the_destination_registry_is_missing() {
+    // The window between deploying the upgrade and creating the registry. A
+    // missing registry must DENY, never fall back to the old behaviour.
+    let mut env = setup_without_destination_registry();
+    let puller = env.pullers[0].insecure_clone();
+    env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+
+    assert!(env
+        .svm
+        .get_account(&env.destination_registry)
+        .map(|a| a.data.is_empty())
+        .unwrap_or(true));
+
+    let ix = pull_ix(&env, puller.pubkey(), SUBSCRIPTIONS_PROGRAM);
+    let err = send(&mut env, ix, &puller, &[&puller]).expect_err("no registry means no pull");
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains("AccountNotInitialized"),
+        "expected AccountNotInitialized for destination_registry, got:\n{logs}"
+    );
+}
+
+#[test]
+fn pull_is_rejected_when_the_registry_layout_version_is_unknown() {
+    use solana_account::Account;
+
+    let mut env = setup();
+    let puller = env.pullers[0].insecure_clone();
+    env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+
+    let existing = env
+        .svm
+        .get_account(&env.destination_registry)
+        .expect("registry exists");
+    assert_eq!(
+        existing.data[8], 1,
+        "version is field 0, so it sits at offset 8 whatever the list length"
+    );
+
+    let mut data = existing.data.clone();
+    data[8] = 2;
+    env.svm
+        .set_account(env.destination_registry, Account { data, ..existing })
+        .unwrap();
+
+    let ix = pull_ix(&env, puller.pubkey(), SUBSCRIPTIONS_PROGRAM);
+    let err = send(&mut env, ix, &puller, &[&puller])
+        .expect_err("an unknown registry layout must deny the pull");
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains("UnsupportedRegistryVersion"),
+        "expected UnsupportedRegistryVersion, got:\n{logs}"
+    );
+}
+
+#[test]
+fn destination_registry_is_admin_gated_and_created_once() {
+    let mut env = setup_without_destination_registry();
+    let attacker = Keypair::new();
+    env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = initialize_destinations_ix(&env, attacker.pubkey(), vec![attacker.pubkey()]);
+    let err = send(&mut env, ix, &attacker, &[&attacker])
+        .expect_err("only the config admin may create the registry");
+    assert!(err.meta.logs.join("\n").contains("Unauthorized"));
+
+    let admin = env.admin.insecure_clone();
+    let ix = initialize_destinations_ix(&env, admin.pubkey(), vec![]);
+    send(&mut env, ix, &admin, &[&admin]).expect("admin creates the registry");
+
+    env.svm.expire_blockhash();
+    let ix = initialize_destinations_ix(&env, admin.pubkey(), vec![]);
+    send(&mut env, ix, &admin, &[&admin]).expect_err("the registry is create-once");
+
+    let ix = set_destination_owners_ix(&env, attacker.pubkey(), vec![attacker.pubkey()]);
+    let err = send(&mut env, ix, &attacker, &[&attacker])
+        .expect_err("only the config admin may change the destination list");
+    assert!(err.meta.logs.join("\n").contains("Unauthorized"));
+}
+
+#[test]
+fn destination_owner_list_is_bounded_by_the_allocated_space() {
+    let mut env = setup();
+    let admin = env.admin.insecure_clone();
+
+    let too_many = vec![Pubkey::new_unique(); MAX_DESTINATIONS + 1];
+    let ix = set_destination_owners_ix(&env, admin.pubkey(), too_many);
+    let err = send(&mut env, ix, &admin, &[&admin])
+        .expect_err("a list longer than MAX_DESTINATIONS cannot fit the account");
+    assert!(err.meta.logs.join("\n").contains("TooManyDestinations"));
+
+    let full = vec![Pubkey::new_unique(); MAX_DESTINATIONS];
+    let ix = set_destination_owners_ix(&env, admin.pubkey(), full);
+    send(&mut env, ix, &admin, &[&admin]).expect("a full list must fit the allocated space");
+}
+
+#[test]
+fn close_destination_registry_reclaims_rent_to_an_admin_who_pays_no_fee() {
+    let mut env = setup();
+    let admin = env.admin.insecure_clone();
+    let payer = Keypair::new();
+    env.svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
+
+    let admin_before = env.svm.get_account(&admin.pubkey()).map(|a| a.lamports).unwrap_or(0);
+    let rent = env
+        .svm
+        .get_account(&env.destination_registry)
+        .expect("the registry exists")
+        .lamports;
+
+    let ix = close_destination_registry_ix(&env, admin.pubkey());
+    send(&mut env, ix, &payer, &[&payer, &admin])
+        .expect("close_destination_registry must work when the admin only signs");
+
+    assert!(env
+        .svm
+        .get_account(&env.destination_registry)
+        .map(|a| a.data.is_empty())
+        .unwrap_or(true));
+    let admin_after = env.svm.get_account(&admin.pubkey()).map(|a| a.lamports).unwrap_or(0);
+    assert_eq!(
+        admin_after,
+        admin_before + rent,
+        "the registry's rent must reach the admin, who paid no fee"
+    );
+}
+
+#[test]
+fn close_destination_registry_requires_the_admin() {
+    let mut env = setup();
+    let attacker = Keypair::new();
+    env.svm.airdrop(&attacker.pubkey(), 1_000_000_000).unwrap();
+
+    let ix = close_destination_registry_ix(&env, attacker.pubkey());
+    let err = send(&mut env, ix, &attacker, &[&attacker])
+        .expect_err("a non-admin must not close the registry");
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains("Unauthorized"),
+        "expected Unauthorized, got:\n{logs}"
+    );
+    assert!(
+        env.svm
+            .get_account(&env.destination_registry)
+            .is_some_and(|a| !a.data.is_empty()),
+        "the registry must survive the refused close"
+    );
+}
+
+#[test]
+fn destination_registry_survives_a_config_close() {
+    // `close_config` deallocates the config but leaves the registry standing,
+    // so a re-initialized config inherits the old destination allowlist. Only
+    // `close_destination_registry` clears it, and it must run first.
+    let mut env = setup();
+    let admin = env.admin.insecure_clone();
+    let merchant = Pubkey::new_unique();
+
+    let ix = set_destination_owners_ix(&env, admin.pubkey(), vec![merchant]);
+    send(&mut env, ix, &admin, &[&admin]).expect("admin allowlists a merchant");
+
+    let ix = Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::CloseConfig {}.data(),
+        subscription_controller::accounts::CloseConfig {
+            config: env.config,
+            admin: admin.pubkey(),
+        }
+        .to_account_metas(None),
+    );
+    send(&mut env, ix, &admin, &[&admin]).expect("admin closes the config");
+
+    let registry = env
+        .svm
+        .get_account(&env.destination_registry)
+        .expect("the registry must outlive the config");
+    assert_eq!(registry.data[8], 1);
+    assert_eq!(&registry.data[13..45], merchant.as_ref());
+}
+
+// ---------------------------------------------------------------------------
+// Token-2022 with a transfer fee. The native program forwards whichever token
+// program the account list names, so a fee-bearing mint reaches `pull`:
+// TransferChecked debits the source in full and credits the destination the
+// remainder, parking the fee in the TransferFeeAmount extension — a byte range
+// outside the 165-byte base layout the snapshot reads.
+// ---------------------------------------------------------------------------
+
+mod token_2022 {
+    use super::*;
+    use anchor_lang::solana_program::instruction::AccountMeta;
+    use std::str::FromStr;
+
+    pub const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+    pub fn token_program() -> Pubkey {
+        Pubkey::from_str(TOKEN_2022_PROGRAM).unwrap()
+    }
+
+    pub fn ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+        Pubkey::find_program_address(
+            &[owner.as_ref(), token_program().as_ref(), mint.as_ref()],
+            &Pubkey::from_str(native::ATA_PROGRAM).unwrap(),
+        )
+        .0
+    }
+
+    /// `TransferFee`: epoch(8) + maximum_fee(8) + basis_points(2), LE.
+    fn transfer_fee(basis_points: u16) -> Vec<u8> {
+        let mut fee = Vec::with_capacity(18);
+        fee.extend_from_slice(&0u64.to_le_bytes());
+        fee.extend_from_slice(&u64::MAX.to_le_bytes());
+        fee.extend_from_slice(&basis_points.to_le_bytes());
+        fee
+    }
+
+    /// Mint: 82-byte classic base padded to 165, AccountType::Mint at 165, then
+    /// a TLV `TransferFeeConfig` (type 1, len 108).
+    pub fn mint_with_transfer_fee(
+        authority: &Pubkey,
+        supply: u64,
+        decimals: u8,
+        basis_points: u16,
+    ) -> Vec<u8> {
+        let mut data = vec![0u8; 166];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes());
+        data[4..36].copy_from_slice(authority.as_ref());
+        data[36..44].copy_from_slice(&supply.to_le_bytes());
+        data[44] = decimals;
+        data[45] = 1;
+        data[165] = 1;
+
+        let mut config = Vec::with_capacity(108);
+        config.extend_from_slice(&[0u8; 32]);
+        config.extend_from_slice(&[0u8; 32]);
+        config.extend_from_slice(&0u64.to_le_bytes());
+        config.extend_from_slice(&transfer_fee(basis_points));
+        config.extend_from_slice(&transfer_fee(basis_points));
+
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&(config.len() as u16).to_le_bytes());
+        data.extend_from_slice(&config);
+        data
+    }
+
+    /// Token account: 165-byte classic base, AccountType::Account at 165, then
+    /// a TLV `TransferFeeAmount` (type 2, len 8).
+    pub fn token_account_with_withheld(mint: &Pubkey, owner: &Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = vec![0u8; 166];
+        data[0..32].copy_from_slice(mint.as_ref());
+        data[32..64].copy_from_slice(owner.as_ref());
+        data[64..72].copy_from_slice(&amount.to_le_bytes());
+        data[108] = 1;
+        data[165] = 2;
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(&8u16.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data
+    }
+
+    pub fn withheld_amount(data: &[u8]) -> u64 {
+        u64::from_le_bytes(data[170..178].try_into().unwrap())
+    }
+
+    pub fn initialize_authority_ix(user: &Pubkey, mint: &Pubkey) -> Instruction {
+        Instruction::new_with_bytes(
+            SUBSCRIPTIONS_PROGRAM,
+            &[0u8],
+            vec![
+                AccountMeta::new(*user, true),
+                AccountMeta::new(native::subscription_authority(user, mint), false),
+                AccountMeta::new_readonly(*mint, false),
+                AccountMeta::new(ata(user, mint), false),
+                AccountMeta::new_readonly(
+                    Pubkey::from_str(native::SYSTEM_PROGRAM).unwrap(),
+                    false,
+                ),
+                AccountMeta::new_readonly(token_program(), false),
+            ],
+        )
+    }
+
+    pub fn pull_payment_metas(
+        delegation: &Pubkey,
+        delegator: &Pubkey,
+        delegatee: &Pubkey,
+        mint: &Pubkey,
+        destination: &Pubkey,
+    ) -> Vec<AccountMeta> {
+        vec![
+            AccountMeta::new(*delegation, false),
+            AccountMeta::new_readonly(native::subscription_authority(delegator, mint), false),
+            AccountMeta::new(ata(delegator, mint), false),
+            AccountMeta::new(*destination, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new_readonly(token_program(), false),
+            AccountMeta::new_readonly(*delegatee, false),
+            AccountMeta::new_readonly(native::event_authority(), false),
+            AccountMeta::new_readonly(SUBSCRIPTIONS_PROGRAM, false),
+        ]
+    }
+}
+
+#[test]
+fn pull_is_rejected_for_a_fee_bearing_mint_that_shortchanges_the_merchant() {
+    use anchor_lang::solana_program::clock::Clock;
+    use solana_account::Account;
+
+    const DECIMALS: u8 = 6;
+    const FUNDED: u64 = 100_000_000;
+    const AMOUNT_PER_PERIOD: u64 = 50_000_000;
+    const FEE_BASIS_POINTS: u16 = 9_900;
+
+    let mut env = setup();
+    let native_program = include_bytes!("fixtures/subscriptions_program.so");
+    env.svm
+        .add_program(SUBSCRIPTIONS_PROGRAM, native_program)
+        .unwrap();
+
+    #[allow(deprecated)]
+    let mainnet_rent = anchor_lang::solana_program::rent::Rent {
+        lamports_per_byte_year: 3480,
+        exemption_threshold: 1.0,
+        burn_percent: 50,
+    };
+    env.svm.set_sysvar(&mainnet_rent);
+
+    let puller = env.pullers[0].insecure_clone();
+    let delegator = Keypair::new();
+    let merchant = Pubkey::new_unique();
+    env.svm.airdrop(&puller.pubkey(), 10_000_000_000).unwrap();
+    env.svm.airdrop(&delegator.pubkey(), 10_000_000_000).unwrap();
+
+    let mint = Pubkey::new_unique();
+    let mint_authority = Pubkey::new_unique();
+    let source_ata = token_2022::ata(&delegator.pubkey(), &mint);
+    let dest_ata = token_2022::ata(&merchant, &mint);
+    for (address, data) in [
+        (
+            mint,
+            token_2022::mint_with_transfer_fee(
+                &mint_authority,
+                FUNDED,
+                DECIMALS,
+                FEE_BASIS_POINTS,
+            ),
+        ),
+        (
+            source_ata,
+            token_2022::token_account_with_withheld(&mint, &delegator.pubkey(), FUNDED),
+        ),
+        (
+            dest_ata,
+            token_2022::token_account_with_withheld(&mint, &merchant, 0),
+        ),
+    ] {
+        env.svm
+            .set_account(
+                address,
+                Account {
+                    lamports: 10_000_000,
+                    data,
+                    owner: token_2022::token_program(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    let init_ix = token_2022::initialize_authority_ix(&delegator.pubkey(), &mint);
+    send(&mut env, init_ix, &delegator, &[&delegator]).expect("initialize_authority");
+
+    let authority = native::subscription_authority(&delegator.pubkey(), &mint);
+    let authority_account = env.svm.get_account(&authority).expect("authority created");
+    let init_id = i64::from_le_bytes(authority_account.data[98..106].try_into().unwrap());
+
+    let clock: Clock = env.svm.get_sysvar();
+    let nonce = 1u64;
+    let create_ix = native::create_delegation_ix(
+        &delegator.pubkey(),
+        &env.delegate,
+        &mint,
+        nonce,
+        AMOUNT_PER_PERIOD,
+        3600,
+        clock.unix_timestamp,
+        clock.unix_timestamp + 30 * 86_400,
+        init_id,
+    );
+    send(&mut env, create_ix, &delegator, &[&delegator]).expect("create_recurring_delegation");
+    let delegation =
+        native::recurring_delegation(&authority, &delegator.pubkey(), &env.delegate, nonce);
+
+    let admin = env.admin.insecure_clone();
+    let allow_ix = set_destination_owners_ix(&env, admin.pubkey(), vec![merchant]);
+    send(&mut env, allow_ix, &admin, &[&admin]).expect("admin allowlists the merchant");
+
+    let native_data = native::pull_payment_data(AMOUNT_PER_PERIOD, &delegator.pubkey(), &mint);
+    let mut metas = subscription_controller::accounts::Pull {
+        delegate: env.delegate,
+        puller_key: puller.pubkey(),
+        subscriptions_program: SUBSCRIPTIONS_PROGRAM,
+        config: env.config,
+        destination_registry: env.destination_registry,
+    }
+    .to_account_metas(None);
+    metas.extend(token_2022::pull_payment_metas(
+        &delegation,
+        &delegator.pubkey(),
+        &env.delegate,
+        &mint,
+        &dest_ata,
+    ));
+    let ix = Instruction::new_with_bytes(
+        env.program_id,
+        &subscription_controller::instruction::Pull { native_data }.data(),
+        metas,
+    );
+
+    let err = send(&mut env, ix, &puller, &[&puller])
+        .expect_err("a mint that keeps 99% of the transfer must not settle a subscription");
+    let logs = err.meta.logs.join("\n");
+    assert!(!logs.is_empty(), "the pull must reach execution");
+    assert!(
+        logs.contains("PullValueNotConserved"),
+        "expected PullValueNotConserved, got:\n{logs}"
+    );
+
+    let source = env.svm.get_account(&source_ata).unwrap();
+    let destination = env.svm.get_account(&dest_ata).unwrap();
+    assert_eq!(native::token_amount(&source.data), FUNDED);
+    assert_eq!(native::token_amount(&destination.data), 0);
+    assert_eq!(token_2022::withheld_amount(&destination.data), 0);
 }

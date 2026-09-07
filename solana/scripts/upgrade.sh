@@ -74,6 +74,26 @@ while true; do
     solana confirm "$SIG" --url "$URL" || true
     solana program show "$PROGRAM_ID" --url "$URL"
     echo "buffer rent was refunded to $AUTHORITY (the spill account)."
+    # The upgraded binary requires the destination registry: until it exists,
+    # every pull is denied. An existing but EMPTY registry pays nobody, which
+    # looks the same from the outside. A read that fails also lands here.
+    REGISTRY_STATE=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null || true)
+    # The registry is gated on the CONFIG admin, which a handover can move away
+    # from the upgrade authority. Fall back only when the read gave us nothing.
+    REGISTRY_SIGNER=$(echo "$REGISTRY_STATE" | awk '$1=="admin"{print $3}')
+    [[ -n "$REGISTRY_SIGNER" ]] || REGISTRY_SIGNER="$AUTHORITY"
+    REGISTRY_BAD=true
+    if [[ "$REGISTRY_STATE" != *"registry ver"* ]]; then
+      echo "⚠️  Destination registry NOT initialized — pulls will fail until you run:" >&2
+    elif [[ "$REGISTRY_STATE" == *"<EMPTY"* ]]; then
+      echo "⚠️  Destination registry is EMPTY — no destination is payable until you run:" >&2
+    else
+      REGISTRY_BAD=false
+    fi
+    if $REGISTRY_BAD; then
+      echo "   cargo run -p admin-cli -- $PROGRAM_ID tx:$REGISTRY_SIGNER $RPC_URL destinations <merchant-owner ...>" >&2
+      echo "   then sign the printed UNSIGNED_TX_B64 with: python3 scripts/sign_in_browser.py <b64> $REGISTRY_SIGNER" >&2
+    fi
     exit 0
   fi
   echo

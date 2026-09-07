@@ -12,7 +12,10 @@
 
 use {
     anchor_lang::{prelude::Pubkey, AccountSerialize, Discriminator},
-    subscription_controller::{Config, MAX_PULLER_KEYS},
+    subscription_controller::{
+        Config, DestinationRegistry, DESTINATION_REGISTRY_VERSION, MAX_DESTINATIONS,
+        MAX_PULLER_KEYS,
+    },
 };
 
 const DISCRIMINATOR: [u8; 8] = [155, 12, 170, 224, 30, 250, 204, 130];
@@ -90,5 +93,65 @@ fn a_full_config_exactly_fills_its_allocated_space() {
         Config::SPACE,
         "a full puller-key list leaves no spare byte, so an appended field \
          cannot be written and every instruction that loads Config fails"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The destination registry is a NEW account, so its layout is not yet frozen by
+// anything on chain. These guards pin the one property the program depends on:
+// `version` is field 0, so it is readable at a fixed offset no matter how long
+// the owner list is, which is what makes a future migration detectable.
+// ---------------------------------------------------------------------------
+
+fn serialize_registry(registry: &DestinationRegistry) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    registry
+        .try_serialize(&mut bytes)
+        .expect("DestinationRegistry serializes");
+    bytes
+}
+
+#[test]
+fn registry_space_fits_a_full_owner_list() {
+    let bytes = serialize_registry(&DestinationRegistry {
+        version: DESTINATION_REGISTRY_VERSION,
+        destination_owners: vec![Pubkey::new_from_array([5u8; 32]); MAX_DESTINATIONS],
+    });
+    assert_eq!(DestinationRegistry::SPACE, 525);
+    assert_eq!(bytes.len(), DestinationRegistry::SPACE);
+}
+
+#[test]
+fn registry_version_is_field_zero_at_a_fixed_offset() {
+    for count in [0usize, 1, 2, MAX_DESTINATIONS] {
+        let owners = vec![Pubkey::new_from_array([5u8; 32]); count];
+        let bytes = serialize_registry(&DestinationRegistry {
+            version: DESTINATION_REGISTRY_VERSION,
+            destination_owners: owners.clone(),
+        });
+
+        assert_eq!(&bytes[0..8], DestinationRegistry::DISCRIMINATOR);
+        assert_eq!(
+            bytes[8], DESTINATION_REGISTRY_VERSION,
+            "version must stay at offset 8 whatever the list length"
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[9..13].try_into().unwrap()),
+            count as u32
+        );
+        for (index, owner) in owners.iter().enumerate() {
+            let offset = 13 + 32 * index;
+            assert_eq!(&bytes[offset..offset + 32], owner.as_ref());
+        }
+        assert_eq!(bytes.len(), 13 + 32 * count);
+    }
+}
+
+#[test]
+fn registry_and_config_are_distinct_account_types() {
+    assert_ne!(
+        Config::DISCRIMINATOR,
+        DestinationRegistry::DISCRIMINATOR,
+        "a shared discriminator would let one account be loaded as the other"
     );
 }
