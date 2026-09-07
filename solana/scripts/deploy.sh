@@ -141,7 +141,8 @@ if $INITIALIZED; then
   CONFIG_STATE=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show || true)
   ON_CHAIN_ADMIN=$(echo "$CONFIG_STATE" | awk '$1=="admin"{print $3}')
   if [[ -z "$ON_CHAIN_ADMIN" ]]; then
-    echo "⚠️  could not read the config admin back — the RPC returned nothing." >&2
+    echo "⚠️  could not read the config admin back — the read failed or returned" >&2
+    echo "   nothing (RPC error, admin-cli build failure, or unexpected output)." >&2
     echo "   PROGRAM_ID is already pinned in $ENV_FILE; verify before wiring the backend:" >&2
     echo "   cargo run -p admin-cli -- $PROGRAM_ID tx:$UPGRADE_AUTHORITY $RPC_URL show" >&2
   elif [[ "$ON_CHAIN_ADMIN" != "$UPGRADE_AUTHORITY" ]]; then
