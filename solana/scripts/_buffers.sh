@@ -1,19 +1,6 @@
-# Sourced helper — upgrade buffers left behind by an interrupted deploy or
-# upgrade.
-#
-# A buffer that still exists is locked-up rent, and while its authority is
-# also the program's upgrade authority it is a second live path to upgrade
-# the program. Both reasons to notice it and close it.
-#
-# The two CLI subcommands spell the filter differently: `solana program show`
-# takes `--buffer-authority <PUBKEY>`, `solana program close` takes
-# `--authority <SIGNER>` (a keypair path, not a pubkey).
+# Buffer listing uses --buffer-authority <pubkey>; closing uses --authority <signer>.
 
-# list_buffers <authority-pubkey> <url> — the CLI's own table rows. It pads the
-# table with blank lines and a "Buffer Address | ..." header even when it found
-# nothing, and may print unrelated notices on stdout, so only rows whose first
-# column is a base58 address are kept; empty output means no buffers. Non-zero
-# means the listing itself failed.
+# Keep address rows only; headers may appear even when no buffers exist. Nonzero means RPC failure.
 list_buffers() {
   local table
   table=$(solana program show --buffers --buffer-authority "$1" --url "$2" 2>/dev/null) || return 1
@@ -21,8 +8,7 @@ list_buffers() {
     | awk 'length($1) >= 32 && length($1) <= 44 && $1 !~ /[^1-9A-HJ-NP-Za-km-z]/'
 }
 
-# report_stray_buffers <authority-pubkey> <url> [how-to-close]
-# Warns on stderr, never fails.
+# Report listing failures and stray buffers without aborting the caller.
 report_stray_buffers() {
   local authority="$1" url="$2" hint="${3:-scripts/buffers.sh <env> --close}" strays
   if ! strays=$(list_buffers "$authority" "$url"); then

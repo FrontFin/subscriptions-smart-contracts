@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# Upgrade an env's program with the authority wallet signing IN THE BROWSER —
-# no private key is ever pasted or stored, and the wallet is the only funded
-# wallet you maintain. Two popups:
-#
-#   popup 1  fund a temporary payer (working capital for the staging buffer;
-#            the buffer rent is refunded to the WALLET when the upgrade lands,
-#            and leftovers in the temporary payer are swept back on exit);
-#   popup 2  sign the upgrade itself.
-#
-# First deploys use scripts/deploy.sh.
-#
-# Usage: scripts/upgrade.sh <local|dev|prod>     [FEE_PAYER=<path> overrides]
+# Browser signs funding and upgrade; buffer rent returns to the authority.
+# Usage: scripts/upgrade.sh <local|dev|prod> [FEE_PAYER=<path> override]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/_ephemeral.sh
@@ -36,8 +26,7 @@ if (( SIZE > CURRENT_LEN )); then
   GROW=$(( SIZE - CURRENT_LEN ))
   (( GROW < 10240 )) && GROW=10240
 fi
-# Working capital: buffer rent (refunded to the WALLET as the upgrade's spill)
-# + allocation growth rent (stays with the program) + fee margin.
+# Buffer rent is refunded; allocation growth rent stays with the program.
 FUND_LAMPORTS=$(python3 -c "print(($SIZE + 200 + $GROW) * 6960 + 20_000_000)")
 
 echo "environment       : $ENV (upgrade, browser-signed — two wallet popups)"
@@ -54,7 +43,6 @@ echo
 read -rp "Stage this upgrade on MAINNET? Type 'upgrade' to proceed: " CONFIRM
 [[ "$CONFIRM" == "upgrade" ]] || { echo "aborted"; exit 1; }
 
-# Popup 1 — the wallet funds the temporary payer.
 ephemeral_payer "$AUTHORITY" "$FUND_LAMPORTS" "$RPC_URL"
 
 if (( GROW > 0 )); then
@@ -66,7 +54,6 @@ BUFFER=$(solana program write-buffer "$ARTIFACT" --keypair "$PAYER_FILE" --url "
 echo "buffer staged: $BUFFER"
 solana program set-buffer-authority "$BUFFER" --new-buffer-authority "$AUTHORITY" --keypair "$PAYER_FILE" --url "$URL" >/dev/null
 
-# Popup 2 — the wallet signs the upgrade.
 while true; do
   B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" upgrade "$BUFFER" \
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')

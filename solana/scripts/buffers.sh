@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
-# List — and optionally close — the upgrade buffers an env's authority holds.
-#
-# Run it after any interrupted deploy or upgrade. A leftover buffer holds
-# rent, and while it belongs to the program's upgrade authority it is a
-# second live path to upgrade the program.
-#
-# Usage:
-#   scripts/buffers.sh <local|dev|prod>                    list them
-#   scripts/buffers.sh <local|dev|prod> --close            close all of them
-#   scripts/buffers.sh <local|dev|prod> --close <buffer>   close just that one
-#
-# Listing is read-only. Closing needs the AUTHORITY to sign, so its key is
-# pasted at the prompt (hidden input, temp file outside the repo, removed on
-# exit). Once the authority is a Squads vault no such key exists — close the
-# buffers from the Squads app instead.
+# Usage: scripts/buffers.sh <local|dev|prod> [--close [buffer-address]]
+# --close without an address closes all buffers owned by the authority.
+# Wallet authorities sign via key prompt; PDA authorities must close through Squads.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/_wallet.sh
@@ -27,9 +15,7 @@ TARGET="${3:-}"
 AUTHORITY=$(env_upgrade_authority "$ENV")
 URL="mainnet-beta"
 
-# A buffer records an authority and some bytes. It is not tied to a program
-# until an upgrade consumes it, so this list belongs to the AUTHORITY — every
-# env sharing that key sees, and can close, the same buffers.
+# Buffers belong to an authority, not an environment; shared keys see the same list.
 SHARED=""
 for envfile in scripts/envs/*.env; do
   other=$(basename "$envfile" .env)
@@ -103,8 +89,7 @@ fi
 
 prompt_wallet "$AUTHORITY"
 
-# -k names the FEE PAYER. --authority only supplies the buffer-authority
-# signature; without -k the fee falls to whatever ~/.config/solana holds.
+# --authority does not select the fee payer; -k is required as well.
 if [[ -n "$TARGET" ]]; then
   solana program close "$TARGET" -k "$WALLET" --authority "$WALLET" --recipient "$AUTHORITY" --url "$URL"
 else

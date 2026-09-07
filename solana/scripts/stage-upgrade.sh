@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
-# Stage a program upgrade for a Squads-held upgrade authority: builds the
-# env, writes the new binary into an on-chain buffer, and hands the buffer to
-# the vault (UPGRADE_AUTHORITY in the env's .env). The upgrade itself is then
-# proposed and approved in the Squads app — no authority key ever touches
-# this machine.
-#
-# The buffer is paid by a plain funded FEE PAYER keypair (working capital,
-# not an authority): default ~/.config/solana/id.json, override with
-# FEE_PAYER=<path>. Needs ~0.7 SOL free (buffer rent, recovered when the
-# upgrade executes and the buffer is consumed).
-#
+# Stage a buffer for the Squads vault; propose and execute the upgrade in Squads.
 # Usage: scripts/stage-upgrade.sh <local|dev|prod>
+# FEE_PAYER defaults to ~/.config/solana/id.json.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/_env.sh
@@ -25,8 +16,7 @@ FEE_PAYER="${FEE_PAYER:-$HOME/.config/solana/id.json}"
 [[ -f "$FEE_PAYER" ]] || { echo "error: fee payer keypair $FEE_PAYER not found (set FEE_PAYER=<path>)" >&2; exit 1; }
 FEE_PAYER_PUBKEY=$(solana-keygen pubkey "$FEE_PAYER")
 
-# A buffer handed to anything but the program's real upgrade authority strands
-# its rent and can never be executed, so read that authority off chain.
+# A buffer sent to an authority other than the program's cannot be used for its upgrade.
 PROGRAM_INFO=$(solana program show "$PROGRAM_ID" --url "$URL" 2>/dev/null) \
   || { echo "error: $PROGRAM_ID is not deployed on $URL — first deploys use scripts/deploy.sh" >&2; exit 1; }
 ON_CHAIN_AUTHORITY=$(printf '%s\n' "$PROGRAM_INFO" | awk '/^Authority:/ {print $2}')

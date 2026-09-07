@@ -1,10 +1,4 @@
-# Sourced helper — environment resolution for build/deploy/close scripts.
-#
-# Environments live in scripts/envs/<env>.env (puller keys) plus a per-env
-# program keypair scripts/envs/<env>-program-keypair.json (gitignored; local
-# pins PROGRAM_ID in its env file instead). Different program keypair per
-# env → different program ID → different MeshDelegate PDA, so local/dev/prod
-# coexist on mainnet without touching each other.
+# Environment values and pinned program IDs live in scripts/envs/<env>.env.
 
 env_file() {
   local env="$1" f="scripts/envs/$1.env"
@@ -12,9 +6,7 @@ env_file() {
   echo "$f"
 }
 
-# Fails unless the value decodes to exactly 32 bytes. The base58 alphabet and a
-# 32..44 character band are not enough on their own: a paste that loses a couple
-# of characters stays inside the band and still decodes short.
+# Validate decoded length; base58 character count alone cannot detect truncated keys.
 require_pubkey() {
   local value="$1" label="$2"
   python3 - "$value" <<'PY' && return 0
@@ -34,8 +26,6 @@ PY
   return 1
 }
 
-# Prints the env's upgrade-authority pubkey (public; the private key is
-# prompted at deploy/close time, never stored).
 env_upgrade_authority() {
   local f; f=$(env_file "$1") || return 1
   local ua
@@ -44,10 +34,7 @@ env_upgrade_authority() {
   echo "$ua"
 }
 
-# Prints the env's program id — the PUBLIC value pinned as PROGRAM_ID in the
-# env file. No program keypair is ever stored: deploy.sh mints a throwaway
-# keypair at the env's FIRST deploy, pins the resulting id here, and discards
-# the secret. Until that first deploy the env simply has no id.
+# deploy.sh pins the public ID on first deploy; its throwaway key is not retained.
 env_program_id() {
   local f; f=$(env_file "$1") || return 1
   local pinned
