@@ -15,4 +15,14 @@ pub enum ControllerError {
     UnexpectedNativeInstruction,
     #[msg("Config cannot be closed while an admin handover is pending")]
     HandoverPending,
+    // APPENDED. Anchor numbers these positionally from 6000 and both live
+    // deployments already publish 6000..=6004, so a new variant may only be
+    // added at the end — never inserted.
+    //
+    // NOTE: feature/sec-118-destination-allowlist also appends, starting at
+    // this same 6005. Both branches are stacked on fix/audit-remediation, so
+    // whichever merges SECOND must move its own variants after the first's —
+    // the number is the wire contract, not the name.
+    #[msg("Pull amount is below MIN_PULL_AMOUNT")]
+    AmountBelowMinimum,
 }

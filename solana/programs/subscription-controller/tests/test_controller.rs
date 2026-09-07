@@ -22,7 +22,7 @@ use {
     solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
     solana_transaction::versioned::VersionedTransaction,
-    subscription_controller::{CONFIG_SEED, DELEGATE_SEED, SUBSCRIPTIONS_PROGRAM},
+    subscription_controller::{CONFIG_SEED, DELEGATE_SEED, MIN_PULL_AMOUNT, SUBSCRIPTIONS_PROGRAM},
 };
 
 /// Two puller keypairs the suite signs with. Derived from fixed, public
@@ -46,11 +46,17 @@ struct Env {
 }
 
 /// A valid native `pull_payment` payload: disc 5 + 72 bytes = 73 total. The
-/// controller pins disc + length; the contents beyond that only matter once
-/// the CPI reaches the (in most tests, absent) native program.
+/// controller pins disc + length AND floors the amount; the remaining contents
+/// only matter once the CPI reaches the (in most tests, absent) native
+/// program.
 fn valid_native_pull_data() -> Vec<u8> {
+    // The amount must clear MIN_PULL_AMOUNT: every test that expects the gate
+    // to PASS and the failure to come from the CPI asserts only the absence of
+    // "Unauthorized"/"WrongTargetProgram", so a sub-minimum amount here would
+    // leave those tests green while no longer reaching the CPI at all.
     let mut d = vec![5u8];
-    d.extend(std::iter::repeat(0u8).take(72));
+    d.extend_from_slice(&MIN_PULL_AMOUNT.to_le_bytes());
+    d.extend(std::iter::repeat(0u8).take(64));
     d
 }
 
@@ -595,6 +601,60 @@ fn pull_gate_passes_for_every_listed_puller_key() {
     }
 }
 
+/// HAL-008 / SEC-123. The native program rejects only an exact zero, so before
+/// MIN_PULL_AMOUNT a puller key could stream 1-unit pulls indefinitely, each a
+/// separate transaction whose fee Mesh pays. The floor is enforced in the
+/// controller, BEFORE the CPI — so this needs no native binary.
+#[test]
+fn pull_rejects_amounts_below_the_minimum() {
+    let pull_data_of = |amount: u64| {
+        let mut d = vec![5u8];
+        d.extend_from_slice(&amount.to_le_bytes());
+        d.extend(std::iter::repeat(0u8).take(64));
+        d
+    };
+
+    for amount in [0, 1, MIN_PULL_AMOUNT - 1] {
+        let mut env = setup();
+        let puller = env.pullers[0].insecure_clone();
+        env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+
+        let ix = pull_ix_data(
+            &env,
+            puller.pubkey(),
+            SUBSCRIPTIONS_PROGRAM,
+            pull_data_of(amount),
+        );
+        let err = send(&mut env, ix, &puller, &[&puller])
+            .expect_err("an amount below the floor must not be forwarded");
+        let logs = err.meta.logs.join("\n");
+        assert!(
+            logs.contains("AmountBelowMinimum"),
+            "amount {amount} must be rejected by the floor, got:\n{logs}"
+        );
+    }
+
+    // ...and the floor itself passes the gate. The native program is not
+    // deployed here, so the tx still fails — but at the CPI, not at the floor.
+    let mut env = setup();
+    let puller = env.pullers[0].insecure_clone();
+    env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+    let ix = pull_ix_data(
+        &env,
+        puller.pubkey(),
+        SUBSCRIPTIONS_PROGRAM,
+        pull_data_of(MIN_PULL_AMOUNT),
+    );
+    let err = send(&mut env, ix, &puller, &[&puller])
+        .expect_err("CPI into a non-deployed program cannot succeed in LiteSVM");
+    let logs = err.meta.logs.join("\n");
+    assert!(!logs.is_empty(), "the pull must reach execution");
+    assert!(
+        !logs.contains("AmountBelowMinimum"),
+        "exactly MIN_PULL_AMOUNT must clear the floor, got:\n{logs}"
+    );
+}
+
 #[test]
 fn pull_requires_puller_key_signature() {
     let mut env = setup();
@@ -994,7 +1054,11 @@ fn dust_pulls_consume_only_their_own_amount() {
     const DECIMALS: u8 = 6;
     const FUNDED: u64 = 100_000_000;
     const AMOUNT_PER_PERIOD: u64 = 50_000_000;
-    const DUST: u64 = 1;
+    // The smallest amount the controller still forwards. Was 1 before
+    // MIN_PULL_AMOUNT existed; the metering property being measured is
+    // unchanged, and sub-minimum amounts are covered by
+    // `pull_rejects_amounts_below_the_minimum`.
+    const DUST: u64 = MIN_PULL_AMOUNT;
     const DUST_PULLS: u64 = 3;
 
     let mut env = setup();
@@ -1118,8 +1182,15 @@ fn dust_pulls_consume_only_their_own_amount() {
     );
 
     env.svm.expire_blockhash();
-    send(&mut env, pull_of(0), &puller, &[&puller])
-        .expect_err("the native program must reject a zero-amount pull");
+    let zero_err = send(&mut env, pull_of(0), &puller, &[&puller])
+        .expect_err("a zero-amount pull must be rejected");
+    // Zero used to be stopped by the native program. The controller's floor now
+    // catches it first, before the CPI.
+    let zero_logs = zero_err.meta.logs.join("\n");
+    assert!(
+        zero_logs.contains("AmountBelowMinimum"),
+        "expected AmountBelowMinimum, got:\n{zero_logs}"
+    );
 
     env.svm.expire_blockhash();
     send(

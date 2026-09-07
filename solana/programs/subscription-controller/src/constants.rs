@@ -37,3 +37,32 @@ pub const SUBSCRIPTIONS_PROGRAM: Pubkey = pubkey!("De1egAFMkMWZSN5rYXRj9CAdheBam
 /// design tradeoff, mitigated by kill switch + rotation, not by this program.)
 pub const NATIVE_PULL_DISCRIMINATOR: u8 = 5;
 pub const NATIVE_PULL_DATA_LEN: usize = 73;
+
+/// Byte offset of the little-endian `u64` amount inside a `pull_payment`
+/// payload — immediately after the single-byte discriminator. The length above
+/// is pinned before this is read, so the slice is always in range.
+pub const NATIVE_PULL_AMOUNT_OFFSET: usize = 1;
+
+/// Smallest amount `pull` will forward, in the pulled token's BASE UNITS.
+/// 10_000 = $0.01 at USDC's 6 decimals (HAL-008 / SEC-123).
+///
+/// *Why a floor at all:* nothing but the native program's own non-zero check
+/// stood between a puller key and an unbounded stream of 1-unit pulls. Each is
+/// a separate transaction whose base fee — 5_000 lamports per signature, ~$0.0005
+/// at SOL $104 — is paid by the PULLER, i.e. by Mesh. The floor is ~19x that
+/// fee, so a pull can never cost more to submit than it moves.
+///
+/// *Why $0.01 and not more:* Solana has no protocol-level dust limit for SPL
+/// amounts (unlike Bitcoin's 546 sats), so this is a policy number. Wallet-
+/// cleanup tools commonly call anything under $1 dust, but a floor that high
+/// would permanently reject a legitimate sub-dollar plan, prorated charge or
+/// partial retry — and raising or lowering this needs a program upgrade. A cent
+/// is below any real subscription charge and above any plausible dust.
+///
+/// ponytail: denominated in base units against a mint this program does not
+/// pin, so it is $0.01 only for a 6-decimal mint. The product is USDC-only
+/// (README, TDD) so that holds today. Onboarding a mint with different decimals
+/// silently changes what this floor is worth — at that point either pin the
+/// mint at `NATIVE_PULL_MINT_OFFSET` or carry a per-mint floor.
+#[constant]
+pub const MIN_PULL_AMOUNT: u64 = 10_000;

@@ -222,12 +222,27 @@ pub mod subscription_controller {
 
         // Forward ONLY the native recurring pull_payment (pin its single-byte
         // discriminator + exact length). A puller key therefore cannot invoke
-        // any other native instruction as the delegatee. Destination/amount
-        // within pull_payment stay caller-chosen (accepted design tradeoff).
+        // any other native instruction as the delegatee. The DESTINATION within
+        // pull_payment stays caller-chosen (accepted design tradeoff); the
+        // amount does not — see the floor below.
         require!(
             native_data.first() == Some(&NATIVE_PULL_DISCRIMINATOR)
                 && native_data.len() == NATIVE_PULL_DATA_LEN,
             ControllerError::UnexpectedNativeInstruction
+        );
+
+        // Floor the amount (HAL-008 / SEC-123). The native program rejects only
+        // an exact zero, which left a puller key free to stream 1-unit pulls —
+        // each a separate transaction whose fee Mesh pays. The length is pinned
+        // above, so this 8-byte slice is always in range.
+        let amount = u64::from_le_bytes(
+            native_data[NATIVE_PULL_AMOUNT_OFFSET..NATIVE_PULL_AMOUNT_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+        require!(
+            amount >= MIN_PULL_AMOUNT,
+            ControllerError::AmountBelowMinimum
         );
 
         // Build the CPI instruction from the forwarded accounts, force-signing
