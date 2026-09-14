@@ -14,8 +14,28 @@ AUTHORITY=$(env_upgrade_authority "$ENV")
 URL="mainnet-beta"
 RPC_URL="https://api.mainnet-beta.solana.com"
 
-solana program show "$PROGRAM_ID" --url "$URL" >/dev/null 2>&1 \
+PROGRAM_INFO=$(solana program show "$PROGRAM_ID" --url "$URL" 2>/dev/null) \
   || { echo "error: $PROGRAM_ID is not deployed — first deploys use scripts/deploy.sh" >&2; exit 1; }
+
+# Everything below stages a rent-bearing buffer and hands it to $AUTHORITY
+# before the browser is ever asked to sign. Checking the signer afterwards is
+# too late: the buffer is already the authority's and the temporary payer can
+# no longer reclaim it.
+ON_CHAIN_AUTHORITY=$(awk '/^Authority:/ {print $2}' <<<"$PROGRAM_INFO")
+[[ -n "$ON_CHAIN_AUTHORITY" ]] \
+  || { echo "error: could not read $PROGRAM_ID's upgrade authority from $URL" >&2; exit 1; }
+if [[ "$ON_CHAIN_AUTHORITY" != "$AUTHORITY" ]]; then
+  echo "error: UPGRADE_AUTHORITY in $(env_file "$ENV") is $AUTHORITY," >&2
+  echo "       but $PROGRAM_ID's on-chain upgrade authority is $ON_CHAIN_AUTHORITY." >&2
+  echo "       Fix the env file before staging anything." >&2
+  exit 1
+fi
+AUTHORITY_KIND=$(key_kind "$AUTHORITY" "UPGRADE_AUTHORITY") || exit 1
+if [[ "$AUTHORITY_KIND" != "wallet" ]]; then
+  echo "error: the upgrade authority $AUTHORITY is a program address, so it cannot" >&2
+  echo "       sign in the browser. Use scripts/stage-upgrade.sh $ENV for a vault." >&2
+  exit 1
+fi
 
 scripts/build.sh "$ENV"
 ARTIFACT="target/deploy-$ENV/subscription_controller.so"

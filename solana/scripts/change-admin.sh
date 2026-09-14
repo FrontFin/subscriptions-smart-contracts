@@ -53,9 +53,31 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$SIGNER"); then
     echo "signature: $SIG"
-    solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1 || sleep 2
-    cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show || true
-    [[ "$STEP" == "accept" ]] && echo "Handover complete — $NEW_ADMIN is the config admin. Leave UPGRADE_AUTHORITY in scripts/envs/$ENV.env alone; it is the loader's authority, which this did not move."
+    # The browser bridge returns as soon as it sends. Reporting a handover that
+    # never landed is the worst outcome here: the old admin stops using
+    # credentials that are in fact still the only ones that work.
+    if ! solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1; then
+      echo "error: $SIG did not confirm — the admin was NOT changed." >&2
+      exit 1
+    fi
+    STATE=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show) || {
+      echo "error: the transaction confirmed but the config could not be read back," >&2
+      echo "so the admin state is unknown. Check before relying on either wallet:" >&2
+      echo "  cargo run -p admin-cli -- $PROGRAM_ID tx:$SIGNER $RPC_URL show" >&2
+      exit 1
+    }
+    echo "$STATE"
+    if [[ "$STEP" == "accept" ]]; then
+      LIVE=$(awk '$1=="admin"{print $3}' <<<"$STATE")
+      if [[ "$LIVE" != "$NEW_ADMIN" ]]; then
+        echo "error: the config admin reads back as ${LIVE:-unreadable}, not $NEW_ADMIN." >&2
+        echo "The handover did NOT complete. Keep using the current admin wallet." >&2
+        exit 1
+      fi
+      echo "Handover complete — $NEW_ADMIN is the config admin, confirmed on chain."
+      echo "Leave UPGRADE_AUTHORITY in scripts/envs/$ENV.env alone; it is the loader's"
+      echo "authority, which this did not move."
+    fi
     exit 0
   fi
   echo

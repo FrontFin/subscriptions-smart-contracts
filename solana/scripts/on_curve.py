@@ -8,6 +8,12 @@ is chosen precisely because it is not, so nothing can sign for it. A Squads
 vault is a program address: it can neither pay a transaction fee nor sign in a
 browser wallet.
 
+"wallet" means only that a private key COULD exist for this address, never
+that anyone still holds it — a program id whose keypair was thrown away is on
+the curve too. So this rules out the addresses that certainly cannot sign, and
+callers must still treat a successful signature as the only proof of
+possession.
+
 The answer is the printed word, never the exit status. An uncaught exception
 also exits 1, so a caller reading the status alone cannot tell "off the curve"
 from "this script failed to run" — and every caller gates an irreversible
