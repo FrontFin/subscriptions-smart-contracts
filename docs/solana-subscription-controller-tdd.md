@@ -116,9 +116,10 @@ instead of the native pull.
 
 ## Testing & assurance
 
-25 LiteSVM tests: gate (unlisted/wrong-target/non-pull_payment/below-minimum
-rejected, every listed key passes), config lifecycle (init-once,
+25 tests. 20 run in LiteSVM: gate (unlisted/wrong-target/non-pull_payment/
+below-minimum rejected, every listed key passes), config lifecycle (init-once,
 upgrade-authority gate, admin gating, two-step handover, kill switch, close),
-the frozen `Config` byte layout, and an end-to-end subscribe + pull against the
-mainnet-dumped native binary. Embedded `security.txt`. **External audit +
+and an end-to-end subscribe + pull against the mainnet-dumped native binary.
+The other 5 are host-side byte-layout guards over the frozen `Config`, with no
+SVM and no SBF toolchain. Embedded `security.txt`. **External audit +
 smallest-allowed-amount mainnet validation required before real traffic.**

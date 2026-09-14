@@ -12,6 +12,11 @@ VAULT="${2:?usage: scripts/migrate-to-squads.sh <local|dev|prod> <vault-address>
 PROGRAM_ID=$(env_program_id "$ENV")
 CURRENT=$(env_upgrade_authority "$ENV")
 URL="mainnet-beta"
+RPC_URL="https://api.mainnet-beta.solana.com"
+
+# Reject a mistyped address here: on_curve.py cannot classify one, and step 1
+# below is irreversible.
+require_pubkey "$VAULT" "vault address" || exit 1
 
 # A Squads vault is a program address. An ordinary wallet key would be accepted
 # by every step below and made the permanent upgrade authority, while the rest
@@ -20,6 +25,29 @@ if python3 scripts/on_curve.py "$VAULT"; then
   echo "error: $VAULT is an ordinary wallet address, not a Squads vault." >&2
   echo "A vault is a program address and has no private key. Copy the vault" >&2
   echo "address from Squads, not a member's wallet address. Nothing was sent." >&2
+  exit 1
+fi
+
+# Step 1 is irreversible and step 2 is signed by this same wallet as the config
+# admin. If a previous handover already moved the admin elsewhere, step 2 would
+# be rejected after step 1 had already given the program away.
+ADMIN_OUT=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$CURRENT" "$RPC_URL" show 2>&1) || {
+  echo "error: could not read the on-chain config, so the config admin is unknown." >&2
+  echo "Nothing was sent. Retry when the RPC answers:" >&2
+  echo "$ADMIN_OUT" >&2
+  exit 1
+}
+LIVE_ADMIN=$(awk '$1=="admin"{print $3}' <<<"$ADMIN_OUT")
+if [[ -z "$LIVE_ADMIN" ]]; then
+  echo "error: $PROGRAM_ID has no config account, so there is no admin to hand" >&2
+  echo "over. Initialize it first. Nothing was sent." >&2
+  exit 1
+fi
+if [[ "$LIVE_ADMIN" != "$CURRENT" ]]; then
+  echo "error: the live config admin is $LIVE_ADMIN, but this script signs as" >&2
+  echo "$CURRENT. Step 2 would be rejected after step 1 had already moved the" >&2
+  echo "upgrade authority for good. Nothing was sent." >&2
+  echo "Run the propose from $LIVE_ADMIN, or fix UPGRADE_AUTHORITY in the env file." >&2
   exit 1
 fi
 

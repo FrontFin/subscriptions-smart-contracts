@@ -7,8 +7,12 @@
 #
 # Run `propose` first (current-admin browser popup), then have the new admin
 # run `accept` (new-admin browser popup). If you control both wallets, run
-# both yourself. After a completed handover, update UPGRADE_AUTHORITY in the
-# env's .env to the new wallet.
+# both yourself.
+#
+# This moves Config.admin only. The loader's upgrade authority is separate and
+# is what UPGRADE_AUTHORITY in the env file means, so do NOT repoint that line
+# at the new admin — upgrade.sh would then sign with a key the loader rejects.
+# Admin-signing scripts read the live admin from chain.
 #
 # The private key never leaves the wallet extension (localhost bridge).
 #
@@ -51,7 +55,7 @@ while true; do
     echo "signature: $SIG"
     solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1 || sleep 2
     cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show || true
-    [[ "$STEP" == "accept" ]] && echo "Handover complete — update UPGRADE_AUTHORITY in scripts/envs/$ENV.env to $NEW_ADMIN"
+    [[ "$STEP" == "accept" ]] && echo "Handover complete — $NEW_ADMIN is the config admin. Leave UPGRADE_AUTHORITY in scripts/envs/$ENV.env alone; it is the loader's authority, which this did not move."
     exit 0
   fi
   echo

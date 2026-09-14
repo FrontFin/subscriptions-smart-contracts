@@ -81,8 +81,16 @@ wallet accepts). Two transactions signed by two different wallets:
   ```bash
    scripts/change-admin.sh <env> accept <new-admin-pubkey>
   ```
-   If you control both wallets, run both yourself. Then update
-   `UPGRADE_AUTHORITY` in `scripts/envs/<env>.env` to the new wallet.
+   If you control both wallets, run both yourself.
+
+> **Do not repoint `UPGRADE_AUTHORITY` after this.** `change-admin.sh` moves
+> only `Config.admin`. The loader's upgrade authority is a separate on-chain
+> value that only `solana program set-upgrade-authority` changes, and
+> `scripts/migrate-to-squads.sh` is the script that does it. The env file has
+> one `UPGRADE_AUTHORITY` line and the scripts read it as the **loader**
+> authority, so pointing it at the new config admin makes `upgrade.sh` and
+> `stage-upgrade.sh` sign with a wallet the loader rejects. The admin-signing
+> scripts read the live admin from chain and do not need the env file changed.
 
 ### The upgrade authority outranks the config admin
 
@@ -196,7 +204,7 @@ add members/threshold when prod needs it.
 **Testing.**
 
 ```bash
-./test.sh                       # 25 LiteSVM tests must pass
+./test.sh                       # 25 tests must pass (20 LiteSVM + 5 host-side layout guards)
 ```
 
 The suite creates the on-chain Config itself with keypairs derived from

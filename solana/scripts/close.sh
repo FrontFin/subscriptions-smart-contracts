@@ -23,8 +23,20 @@ case "${2:-}" in
 esac
 
 if [[ "$MODE" == "--print" ]]; then
-  echo "=== 1/2 close_config — reclaims the config rent ==="
-  cargo run -q -p admin-cli -- "$PROGRAM_ID" print "$RPC_URL" close-config
+  # print mode cannot build close_config without a config, and would abort the
+  # whole script under set -e. The program close does not depend on it.
+  SHOW_OUT=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "print:$AUTHORITY" "$RPC_URL" show 2>&1) || {
+    echo "error: could not read the on-chain config — cannot tell whether one" >&2
+    echo "exists, so the teardown order is unknown. Retry when the RPC answers:" >&2
+    echo "$SHOW_OUT" >&2
+    exit 1
+  }
+  if awk '$1=="admin"{found=1} END{exit !found}' <<<"$SHOW_OUT"; then
+    echo "=== 1/2 close_config — reclaims the config rent ==="
+    cargo run -q -p admin-cli -- "$PROGRAM_ID" print "$RPC_URL" close-config
+  else
+    echo "=== 1/2 close_config — SKIP, no config account on chain ==="
+  fi
   echo
   echo "=== 2/2 loader Close — burns $PROGRAM_ID, refunds its rent ==="
   cargo run -q -p admin-cli -- "$PROGRAM_ID" "print:$AUTHORITY" "$RPC_URL" close "$RECIPIENT"
@@ -146,10 +158,22 @@ while true; do
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || { echo "aborted"; exit 1; }
 done
 
-if solana program show "$PROGRAM_ID" --url "$URL" >/dev/null 2>&1; then
+# Scrub only on a positive "the account is gone". solana program show also
+# exits non-zero when it cannot reach the RPC, and treating that as proof of
+# closure would erase the only record of a program that is still live.
+SHOW_STATE=$(solana program show "$PROGRAM_ID" --url "$URL" 2>&1) && SHOW_OK=true || SHOW_OK=false
+if $SHOW_OK; then
   echo "error: $PROGRAM_ID is still live on-chain — the close did not take effect." >&2
   echo "PROGRAM_ID stays in scripts/envs/$ENV.env so the next deploy cannot mint a second id." >&2
   echo "Check signature $SIG, then rerun this script." >&2
+  exit 1
+fi
+if ! grep -qiE 'unable to find|not found|does not exist|no account' <<<"$SHOW_STATE"; then
+  echo "error: could not confirm that $PROGRAM_ID is closed." >&2
+  echo "PROGRAM_ID stays in scripts/envs/$ENV.env — erasing it while the program" >&2
+  echo "may still be live would lose the only record of its address." >&2
+  echo "Check signature $SIG, then rerun. The reader said:" >&2
+  echo "$SHOW_STATE" >&2
   exit 1
 fi
 
