@@ -154,3 +154,11 @@ echo "        and SolanaSubscriptionPullerConfig--SmartContractAddress (Backend 
 echo "  MeshDelegate PDA (informational)    : $PDA"
 echo "      → derived by the backend itself from the contract address; becomes the"
 echo "        'delegatee' recorded on each subscription (DB row + on-chain delegation)"
+
+if ! $INITIALIZED; then
+  echo >&2
+  echo "🛑 PARTIAL DEPLOY: the program is live at $PROGRAM_ID and pinned in $ENV_FILE," >&2
+  echo "   but its Config was never initialized and confirmed, so every pull will fail." >&2
+  echo "   Finish it with: scripts/set-puller-keys.sh $ENV" >&2
+  exit 1
+fi

@@ -37,12 +37,36 @@ CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_
 if [[ -n "$CONFIG_ADMIN" ]]; then
   CB64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$CONFIG_ADMIN" "$RPC_URL" close-config \
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
-  # Simulate first: skip gracefully (no scary popup) if the deployed program
-  # predates `close_config`, or the config is already gone.
-  SIM_ERR=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
+  # Simulate first: skip gracefully (no scary popup) only if the deployed
+  # program predates `close_config`. Any other outcome is not safe to skip,
+  # because the program close below is irreversible.
+  SIM=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"simulateTransaction\",\"params\":[\"$CB64\",{\"sigVerify\":false,\"replaceRecentBlockhash\":true,\"encoding\":\"base64\"}]}" \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['value']['err'])" 2>/dev/null)
-  if [[ "$SIM_ERR" == "None" ]]; then
+    | python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin)["result"]["value"]
+except Exception:
+    print("unreadable"); raise SystemExit
+err = value.get("err")
+if err is None:
+    print("ok"); raise SystemExit
+code = None
+if isinstance(err, dict) and isinstance(err.get("InstructionError"), list):
+    detail = err["InstructionError"][1]
+    if isinstance(detail, dict):
+        code = detail.get("Custom")
+print("no-close-config" if code == 101 else "failed " + json.dumps(err))
+' 2>/dev/null) || SIM="unreadable"
+  case "$SIM" in
+    no-close-config)
+      echo "config-rent reclaim unavailable (deployed program has no close_config) — skipping; ~0.0035 SOL orphaned." ;;
+    ok) : ;;
+    *)
+      echo "error: the config close could not be simulated cleanly ($SIM). Closing the program now would leave the live Config account unclosable forever, so stopping. The program is untouched." >&2
+      exit 1 ;;
+  esac
+  if [[ "$SIM" == "ok" ]]; then
     echo "reclaiming config rent (admin $CONFIG_ADMIN)..."
     if CSIG=$(python3 scripts/sign_in_browser.py "$CB64" "$CONFIG_ADMIN"); then
       echo "config close signature: $CSIG"
@@ -54,8 +78,6 @@ if [[ -n "$CONFIG_ADMIN" ]]; then
       echo "error: config close not signed. Closing the program now would leave the Config account unclosable forever. Stopping; the program is untouched." >&2
       exit 1
     fi
-  else
-    echo "config-rent reclaim unavailable (deployed program has no close_config, or config already gone) — skipping; ~0.0035 SOL orphaned."
   fi
 else
   echo "no config found on-chain — skipping config-rent reclaim."
@@ -78,14 +100,21 @@ while true; do
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || { echo "aborted"; exit 1; }
 done
 
-sed -i '' \
-  -e '/^PROGRAM_ID=/d' \
+UNPINNED=$(mktemp)
+sed -e '/^PROGRAM_ID=/d' \
   -e '/^# \^ the smart contract address/d' \
   -e '/^#   SolanaSubscription.*SmartContractAddress/d' \
   -e '/^# The backend derives the MeshDelegate PDA/d' \
   -e '/^# value\. Informational, for cross-checking/d' \
   -e '/^# becomes the .delegatee. recorded/d' \
   -e '/^# MeshDelegate PDA = /d' \
-  "scripts/envs/$ENV.env"
+  "scripts/envs/$ENV.env" > "$UNPINNED" \
+  && cat "$UNPINNED" > "scripts/envs/$ENV.env" \
+  && rm -f "$UNPINNED" \
+  || {
+    rm -f "$UNPINNED"
+    echo "error: the program IS closed, but PROGRAM_ID could not be unpinned from scripts/envs/$ENV.env — delete the PROGRAM_ID line by hand before the next deploy." >&2
+    exit 1
+  }
 echo "Done. Rent refunded to $RECIPIENT."
 echo "Unpinned the burned PROGRAM_ID from scripts/envs/$ENV.env — the next deploy mints a fresh id/PDA."
