@@ -53,5 +53,7 @@ if expected and pubkey != expected:
     sys.exit(f'error: key derives {pubkey}, expected {expected} — wrong key, nothing kept')
 
 fd = os.open(os.environ['OUT'], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+if hasattr(os, 'fchmod'):
+    os.fchmod(fd, 0o600)
 with os.fdopen(fd, 'w') as f:
     json.dump(list(raw), f)

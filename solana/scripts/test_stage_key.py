@@ -29,12 +29,15 @@ def base58(raw):
 
 
 class StageKeyTests(unittest.TestCase):
-    def stage(self, secret, expected='', existing=False, no_site=False):
+    def stage(self, secret, expected='', existing=False, no_site=False,
+              existing_mode=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         out = Path(directory.name) / 'key.json'
         if existing:
             out.write_text('unchanged')
+            if existing_mode is not None:
+                os.chmod(out, existing_mode)
         env = dict(os.environ, SK=secret, EXPECTED=expected, OUT=str(out))
         command = [sys.executable]
         if no_site:
@@ -53,6 +56,16 @@ class StageKeyTests(unittest.TestCase):
                 self.assertEqual(json.loads(out.read_text()), list(raw))
                 if os.name == 'posix':
                     self.assertEqual(stat.S_IMODE(out.stat().st_mode), 0o600)
+
+    @unittest.skipUnless(os.name == 'posix', 'file modes are POSIX-only')
+    def test_existing_world_readable_output_is_tightened_to_owner_only(self):
+        seed, public = VECTORS[0]
+        raw = bytes.fromhex(seed + public)
+        result, out = self.stage(base58(raw), base58(bytes.fromhex(public)),
+                                 existing=True, existing_mode=0o644)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(out.read_text()), list(raw))
+        self.assertEqual(stat.S_IMODE(out.stat().st_mode), 0o600)
 
     def test_forged_public_half_is_rejected_even_when_expected_matches(self):
         raw = bytes.fromhex(VECTORS[0][0] + VECTORS[1][1])
