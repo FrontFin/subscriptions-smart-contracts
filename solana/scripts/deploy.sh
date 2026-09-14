@@ -107,6 +107,22 @@ if ! solana program deploy "$ARTIFACT" \
   exit 1
 fi
 
+# From here the program exists and the temporary payer is its upgrade
+# authority. A Ctrl-C during the handover would otherwise reach _eph_cleanup
+# directly, which sweeps and deletes that key and strands the program.
+AUTHORITY_MOVED=false
+_deploy_cleanup() {
+  if ! $AUTHORITY_MOVED && [[ -z "${FEE_PAYER:-}" ]] && retain_ephemeral_payer; then
+    echo >&2
+    echo "⚠️  $PROGRAM_ID is deployed and the temporary payer is still its upgrade" >&2
+    echo "   authority. Its key is kept at: $RETAINED_PAYER_FILE" >&2
+    echo "   Without that key the program can never be upgraded or closed." >&2
+    echo "   DELETE it once the authority is $UPGRADE_AUTHORITY." >&2
+  fi
+  _eph_cleanup
+}
+trap _deploy_cleanup EXIT INT TERM
+
 # This CLI transfer does not collect a destination signature.
 HANDOVER_REPORTED_OK=true
 solana program set-upgrade-authority "$PROGRAM_ID" \
@@ -145,6 +161,10 @@ if [[ "$ON_CHAIN_UPGRADE_AUTHORITY" != "$UPGRADE_AUTHORITY" ]]; then
   echo "   $ENV_FILE was NOT touched — the deployed id is $PROGRAM_ID." >&2
   exit 1
 fi
+
+# Read back above proves the authority moved, so the payer key no longer has
+# to survive this run.
+AUTHORITY_MOVED=true
 
 # Record the deployed ID before another step can abort and delete the throwaway key.
 PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID")
