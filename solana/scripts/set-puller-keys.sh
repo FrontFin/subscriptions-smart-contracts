@@ -81,10 +81,14 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$SIGNER"); then
     echo "signature: $SIG"
-    confirm_signature "$SIG" "$RPC_URL" || {
-      echo "error: the puller-key change was not confirmed — check the signature above, then read the current keys with admin-cli show before re-running." >&2
+    CONFIRM_RC=0; confirm_signature "$SIG" "$RPC_URL" || CONFIRM_RC=$?
+    if (( CONFIRM_RC == 2 )); then
+      echo "error: the puller-key change's outcome is UNKNOWN — look up $SIG before re-running, or you may apply it twice." >&2
       exit 1
-    }
+    elif (( CONFIRM_RC != 0 )); then
+      echo "error: the puller-key change did not take effect — the on-chain config is unchanged." >&2
+      exit 1
+    fi
     cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show || true
     exit 0
   fi

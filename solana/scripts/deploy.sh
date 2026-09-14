@@ -109,8 +109,13 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the initialize transaction" >&2; break; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$UPGRADE_AUTHORITY"); then
     echo "initialize signature: $SIG"
-    if confirm_signature "$SIG" "$URL"; then
+    CONFIRM_RC=0; confirm_signature "$SIG" "$URL" || CONFIRM_RC=$?
+    if (( CONFIRM_RC == 0 )); then
       INITIALIZED=true
+      break
+    fi
+    if (( CONFIRM_RC == 2 )); then
+      echo "error: the initialize outcome is UNKNOWN — it may have landed. Look up $SIG before retrying, or you risk a second initialize." >&2
       break
     fi
   fi

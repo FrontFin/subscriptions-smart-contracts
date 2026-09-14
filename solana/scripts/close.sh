@@ -70,7 +70,7 @@ print("no-close-config" if code == 101 else "failed " + json.dumps(err))
     echo "reclaiming config rent (admin $CONFIG_ADMIN)..."
     if CSIG=$(python3 scripts/sign_in_browser.py "$CB64" "$CONFIG_ADMIN"); then
       echo "config close signature: $CSIG"
-      confirm_signature "$CSIG" "$URL" || {
+      confirm_signature "$CSIG" "$URL" finalized || {
         echo "error: the config close did not land. Closing the program now would leave the Config account owned by a program that no longer exists — unclosable forever. Stopping; the program is untouched, so re-run once the config close confirms." >&2
         exit 1
       }
@@ -89,10 +89,11 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the close transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$AUTHORITY"); then
     echo "close signature: $SIG"
-    confirm_signature "$SIG" "$URL" || {
-      echo "error: the program close was not confirmed — check the signature above before re-running." >&2
+    CONFIRM_RC=0; confirm_signature "$SIG" "$URL" || CONFIRM_RC=$?
+    if (( CONFIRM_RC != 0 )); then
+      echo "error: the program close was not confirmed — check $SIG before re-running." >&2
       exit 1
-    }
+    fi
     break
   fi
   echo
