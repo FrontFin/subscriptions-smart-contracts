@@ -81,13 +81,21 @@ BUFFER_LIVE=true
 _upgrade_cleanup() {
   if $BUFFER_LIVE; then
     echo >&2
-    echo "The staged buffer $BUFFER still exists." >&2
-    echo "Re-running this script stages a NEW buffer; close the old one with:" >&2
+    echo "The staged buffer $BUFFER still exists. Re-running stages a NEW one." >&2
+    # The handoff may or may not have landed, so look under both owners — and
+    # print the close each one needs. buffers.sh signs as the env's upgrade
+    # authority, so it cannot touch a buffer the fee payer still owns.
+    echo "If $AUTHORITY owns it:" >&2
     echo "  scripts/buffers.sh $ENV --close $BUFFER" >&2
-    # The handoff may or may not have landed, so look under both owners.
     report_stray_buffers "$AUTHORITY" "$URL" "scripts/buffers.sh $ENV --close"
-    [[ -z "${EPHEMERAL_PUBKEY:-}" ]] ||
-      report_stray_buffers "$EPHEMERAL_PUBKEY" "$URL" "scripts/buffers.sh $ENV --close"
+    # Only with a FEE_PAYER override does the payer key outlive this script;
+    # the temporary payer closes its own buffers in _eph_cleanup below.
+    if [[ -n "${FEE_PAYER:-}" && -n "${EPHEMERAL_PUBKEY:-}" ]]; then
+      echo "If $EPHEMERAL_PUBKEY (the FEE_PAYER) owns it:" >&2
+      echo "  solana program close $BUFFER -k $PAYER_FILE --authority $PAYER_FILE --recipient $EPHEMERAL_PUBKEY --url $URL" >&2
+      report_stray_buffers "$EPHEMERAL_PUBKEY" "$URL" \
+        "solana program close --buffers -k $PAYER_FILE --authority $PAYER_FILE --recipient $EPHEMERAL_PUBKEY --url $URL"
+    fi
   fi
   _eph_cleanup
 }
