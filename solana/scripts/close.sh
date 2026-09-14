@@ -1,17 +1,43 @@
 #!/usr/bin/env bash
 # Closing burns the program ID; redeployment changes the PDA and invalidates old delegations.
-# Usage: scripts/close.sh <local|dev|prod> [recipient-pubkey] (default: wallet)
+# Usage: scripts/close.sh <local|dev|prod> [recipient-pubkey|--print]
+# Default: browser signing. --print: Squads instruction for a vault admin.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/_env.sh
 
-ENV="${1:?usage: scripts/close.sh <local|dev|prod> [recipient-pubkey]}"
+ENV="${1:?usage: scripts/close.sh <local|dev|prod> [recipient-pubkey|--print]}"
 [[ "$ENV" != "test" ]] || { echo "error: 'test' is the LiteSVM fixture — nothing on-chain to close" >&2; exit 1; }
 PROGRAM_ID=$(env_program_id "$ENV")
 AUTHORITY=$(env_upgrade_authority "$ENV")
-RECIPIENT="${2:-$AUTHORITY}"
 URL="mainnet-beta"
 RPC_URL="https://api.mainnet-beta.solana.com"
+
+RECIPIENT="$AUTHORITY"
+MODE=""
+case "${2:-}" in
+  "") ;;
+  --print) MODE="--print" ;;
+  --*) echo "error: unknown option $2 (expected --print)" >&2; exit 1 ;;
+  *) RECIPIENT="$2" ;;
+esac
+
+if [[ "$MODE" == "--print" ]]; then
+  cargo run -q -p admin-cli -- "$PROGRAM_ID" print "$RPC_URL" close-config
+  echo
+  echo "Execute that instruction in Squads. It reclaims the config rent only."
+  echo "Once it has landed, rerun 'scripts/close.sh $ENV' to burn the program id."
+  exit 0
+fi
+
+# Both signers below sign in a browser wallet, so neither may be a program
+# address such as a Squads vault. Checked before anything is destroyed.
+if ! python3 scripts/on_curve.py "$AUTHORITY"; then
+  echo "error: upgrade authority $AUTHORITY is a program address, not a wallet." >&2
+  echo "It cannot pay a fee or sign in the browser, so this script cannot burn" >&2
+  echo "the program id. Close the program from Squads instead." >&2
+  exit 1
+fi
 
 echo "environment : $ENV"
 echo "program id  : $PROGRAM_ID"
@@ -26,6 +52,14 @@ read -rp "Type 'close' to proceed: " CONFIRM
 CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null \
   | awk '$1=="admin"{print $3}')
 if [[ -n "$CONFIG_ADMIN" ]]; then
+  if ! python3 scripts/on_curve.py "$CONFIG_ADMIN"; then
+    echo "error: config admin $CONFIG_ADMIN is a program address, not a wallet" >&2
+    echo "(a Squads vault, for example). It can neither pay the fee nor sign in" >&2
+    echo "the browser, so the config rent cannot be reclaimed this way." >&2
+    echo "Run 'scripts/close.sh $ENV --print' and execute the printed instruction" >&2
+    echo "in Squads, then rerun this script. Nothing has been destroyed." >&2
+    exit 1
+  fi
   CB64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$CONFIG_ADMIN" "$RPC_URL" close-config \
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
   [[ -n "$CB64" ]] || { echo "error: could not build the close-config transaction" >&2; exit 1; }

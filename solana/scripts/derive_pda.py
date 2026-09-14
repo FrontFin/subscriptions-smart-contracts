@@ -38,9 +38,14 @@ def oncurve(b):
     return (x * x - x2) % p == 0
 
 
-prog = b58d(sys.argv[1])
-for bump in range(255, -1, -1):
-    h = hashlib.sha256(b'mesh_delegate' + bytes([bump]) + prog + b'ProgramDerivedAddress').digest()
-    if not oncurve(h):
-        print(b58e(h))
-        break
+def main():
+    prog = b58d(sys.argv[1])
+    for bump in range(255, -1, -1):
+        h = hashlib.sha256(b'mesh_delegate' + bytes([bump]) + prog + b'ProgramDerivedAddress').digest()
+        if not oncurve(h):
+            print(b58e(h))
+            break
+
+
+if __name__ == '__main__':
+    main()
