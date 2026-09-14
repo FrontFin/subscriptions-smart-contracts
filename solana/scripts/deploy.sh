@@ -102,6 +102,7 @@ solana program set-upgrade-authority "$PROGRAM_ID" \
 
 # Popup 2 — the wallet initializes the on-chain Config (becomes admin).
 INITIALIZED=false
+INIT_UNKNOWN=""
 while true; do
   # shellcheck disable=SC2086 — KEYS is intentionally word-split
   B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" keys $KEYS \
@@ -115,7 +116,7 @@ while true; do
       break
     fi
     if (( CONFIRM_RC == 2 )); then
-      echo "error: the initialize outcome is UNKNOWN — it may have landed. Look up $SIG before retrying, or you risk a second initialize." >&2
+      INIT_UNKNOWN=$SIG
       break
     fi
   fi
@@ -162,8 +163,14 @@ echo "        'delegatee' recorded on each subscription (DB row + on-chain deleg
 
 if ! $INITIALIZED; then
   echo >&2
-  echo "🛑 PARTIAL DEPLOY: the program is live at $PROGRAM_ID and pinned in $ENV_FILE," >&2
-  echo "   but its Config was never initialized and confirmed, so every pull will fail." >&2
-  echo "   Finish it with: scripts/set-puller-keys.sh $ENV" >&2
+  echo "🛑 PARTIAL DEPLOY: the program is live at $PROGRAM_ID and pinned in $ENV_FILE." >&2
+  if [[ -n "$INIT_UNKNOWN" ]]; then
+    echo "   The initialize transaction's outcome is UNKNOWN — the RPC never answered." >&2
+    echo "   Look up $INIT_UNKNOWN first. Running set-puller-keys.sh before you know" >&2
+    echo "   whether it landed can initialize the config a second time." >&2
+  else
+    echo "   Its Config was never initialized, so every pull will fail." >&2
+    echo "   Finish it with: scripts/set-puller-keys.sh $ENV" >&2
+  fi
   exit 1
 fi

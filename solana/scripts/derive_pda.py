@@ -41,6 +41,8 @@ def oncurve(b):
 
 prog = b58d(sys.argv[1])
 seed = sys.argv[2].encode() if len(sys.argv) > 2 else b'mesh_delegate'
+if len(seed) > 32:
+    sys.exit(f'error: seed is {len(seed)} bytes; Solana allows at most 32 per seed')
 for bump in range(255, -1, -1):
     h = hashlib.sha256(seed + bytes([bump]) + prog + b'ProgramDerivedAddress').digest()
     if not oncurve(h):

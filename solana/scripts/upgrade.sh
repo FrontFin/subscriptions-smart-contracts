@@ -76,7 +76,7 @@ while true; do
       echo "error: the upgrade's outcome is UNKNOWN. Look up $SIG and check whether buffer $BUFFER still exists before staging another one." >&2
       exit 1
     elif (( CONFIRM_RC != 0 )); then
-      echo "error: the upgrade did not take effect, so buffer $BUFFER was not consumed and can be retried with." >&2
+      echo "error: the upgrade did not take effect. Buffer $BUFFER was not consumed and is still staged, so re-running this script can reuse it rather than paying for a new one." >&2
       exit 1
     fi
     solana program show "$PROGRAM_ID" --url "$URL"

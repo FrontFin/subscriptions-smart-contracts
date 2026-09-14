@@ -34,16 +34,19 @@ read -rp "Type 'close' to proceed: " CONFIRM
 # admin — which may differ from the upgrade authority after a handover.
 CONFIG_PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID" config)
 CONFIG_PRESENT=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$CONFIG_PDA\",{\"encoding\":\"base64\"}]}" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$CONFIG_PDA\",{\"encoding\":\"base64\",\"commitment\":\"confirmed\"}]}" \
   | python3 -c '
 import json, sys
 try:
     body = json.load(sys.stdin)
 except Exception:
     print("unreadable"); raise SystemExit
-if not isinstance(body, dict) or "error" in body or "result" not in body:
+if not isinstance(body, dict) or "error" in body:
     print("unreadable"); raise SystemExit
-print("absent" if body["result"].get("value") is None else "present")
+result = body.get("result")
+if not isinstance(result, dict) or "value" not in result:
+    print("unreadable"); raise SystemExit
+print("absent" if result["value"] is None else "present")
 ' 2>/dev/null) || CONFIG_PRESENT="unreadable"
 if [[ "$CONFIG_PRESENT" == "unreadable" ]]; then
   echo "error: could not read the config account $CONFIG_PDA. Closing the program without knowing whether a live Config exists could orphan it forever, so stopping. The program is untouched." >&2
@@ -62,14 +65,16 @@ if [[ "$CONFIG_PRESENT" == "present" ]]; then
   # program predates `close_config`. Any other outcome is not safe to skip,
   # because the program close below is irreversible.
   SIM=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"simulateTransaction\",\"params\":[\"$CB64\",{\"sigVerify\":false,\"replaceRecentBlockhash\":true,\"encoding\":\"base64\"}]}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"simulateTransaction\",\"params\":[\"$CB64\",{\"sigVerify\":false,\"replaceRecentBlockhash\":true,\"encoding\":\"base64\",\"commitment\":\"confirmed\"}]}" \
     | python3 -c '
 import json, sys
 try:
     value = json.load(sys.stdin)["result"]["value"]
 except Exception:
     print("unreadable"); raise SystemExit
-err = value.get("err")
+if not isinstance(value, dict) or "err" not in value:
+    print("unreadable"); raise SystemExit
+err = value["err"]
 if err is None:
     print("ok"); raise SystemExit
 code = None
@@ -91,10 +96,14 @@ print("no-close-config" if code == 101 else "failed " + json.dumps(err))
     echo "reclaiming config rent (admin $CONFIG_ADMIN)..."
     if CSIG=$(python3 scripts/sign_in_browser.py "$CB64" "$CONFIG_ADMIN"); then
       echo "config close signature: $CSIG"
-      confirm_signature "$CSIG" "$URL" finalized || {
-        echo "error: the config close did not land. Closing the program now would leave the Config account owned by a program that no longer exists — unclosable forever. Stopping; the program is untouched, so re-run once the config close confirms." >&2
+      CONFIRM_RC=0; confirm_signature "$CSIG" "$URL" finalized || CONFIRM_RC=$?
+      if (( CONFIRM_RC == 2 )); then
+        echo "error: the config close outcome is UNKNOWN — look up $CSIG before doing anything else. Stopping; the program is untouched." >&2
         exit 1
-      }
+      elif (( CONFIRM_RC != 0 )); then
+        echo "error: the config close did not land. Closing the program now would leave the Config account owned by a program that no longer exists — unclosable forever. Stopping; the program is untouched, so re-run once the config close is finalized." >&2
+        exit 1
+      fi
     else
       echo "error: config close not signed. Closing the program now would leave the Config account unclosable forever. Stopping; the program is untouched." >&2
       exit 1
@@ -110,9 +119,12 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the close transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$AUTHORITY"); then
     echo "close signature: $SIG"
-    CONFIRM_RC=0; confirm_signature "$SIG" "$URL" || CONFIRM_RC=$?
-    if (( CONFIRM_RC != 0 )); then
-      echo "error: the program close was not confirmed — check $SIG before re-running." >&2
+    CONFIRM_RC=0; confirm_signature "$SIG" "$URL" finalized || CONFIRM_RC=$?
+    if (( CONFIRM_RC == 2 )); then
+      echo "error: the program close outcome is UNKNOWN — look up $SIG. Do NOT re-run until you know: PROGRAM_ID is still pinned in scripts/envs/$ENV.env, and re-running on a closed program would mint a second one." >&2
+      exit 1
+    elif (( CONFIRM_RC != 0 )); then
+      echo "error: the program close was not finalized — check $SIG before re-running." >&2
       exit 1
     fi
     break
@@ -122,7 +134,10 @@ while true; do
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || { echo "aborted"; exit 1; }
 done
 
-UNPINNED=$(mktemp "scripts/envs/.$ENV.env.XXXXXX")
+UNPINNED=$(mktemp "scripts/envs/.$ENV.env.XXXXXX") || {
+  echo "error: the program IS closed, but no temporary file could be created next to scripts/envs/$ENV.env — the file is unchanged; delete the PROGRAM_ID line by hand before the next deploy." >&2
+  exit 1
+}
 sed -e '/^PROGRAM_ID=/d' \
   -e '/^# \^ the smart contract address/d' \
   -e '/^#   SolanaSubscription.*SmartContractAddress/d' \
