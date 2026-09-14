@@ -1,6 +1,8 @@
 //! Admin CLI: <program-id> <signer> <rpc-url> <command> [args].
 //! Signer: keypair path sends directly; tx:<pubkey> emits UNSIGNED_TX_B64;
-//! print emits a Squads instruction using the on-chain admin.
+//! print emits a Squads instruction using the on-chain admin; print:<pubkey>
+//! emits one for a signer the config does not name, such as the upgrade
+//! authority on the loader's Close.
 //! keys initializes missing config; an empty key list disables pulls.
 
 use anchor_lang::prelude::Pubkey;
@@ -117,7 +119,10 @@ fn main() {
         std::process::exit(2);
     }
     let program_id = Pubkey::from_str(&args[0]).expect("invalid program id");
-    let print_only = args[1] == "print";
+    let print_signer: Option<Pubkey> = args[1]
+        .strip_prefix("print:")
+        .map(|p| Pubkey::from_str(p).expect("invalid print:<pubkey> signer"));
+    let print_only = args[1] == "print" || print_signer.is_some();
     let tx_payer: Option<Pubkey> = args[1]
         .strip_prefix("tx:")
         .map(|p| Pubkey::from_str(p).expect("invalid tx:<pubkey> payer"));
@@ -132,7 +137,10 @@ fn main() {
         Pubkey::find_program_address(&[subscription_controller::CONFIG_SEED], &program_id);
 
     let admin_pubkey: Pubkey;
-    let keypair = if print_only {
+    let keypair = if let Some(signer) = print_signer {
+        admin_pubkey = signer;
+        None
+    } else if print_only {
         let state = fetch_config(&client, &config)
             .expect("print mode needs an existing config (initialize directly first)");
         admin_pubkey = if command == "accept-admin" {

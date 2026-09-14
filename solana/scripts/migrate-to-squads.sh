@@ -13,6 +13,16 @@ PROGRAM_ID=$(env_program_id "$ENV")
 CURRENT=$(env_upgrade_authority "$ENV")
 URL="mainnet-beta"
 
+# A Squads vault is a program address. An ordinary wallet key would be accepted
+# by every step below and made the permanent upgrade authority, while the rest
+# of the tooling would keep treating it as a vault.
+if python3 scripts/on_curve.py "$VAULT"; then
+  echo "error: $VAULT is an ordinary wallet address, not a Squads vault." >&2
+  echo "A vault is a program address and has no private key. Copy the vault" >&2
+  echo "address from Squads, not a member's wallet address. Nothing was sent." >&2
+  exit 1
+fi
+
 echo "environment       : $ENV"
 echo "program id        : $PROGRAM_ID"
 echo "current authority : $CURRENT (its key is prompted below, one last time)"

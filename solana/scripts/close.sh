@@ -23,10 +23,18 @@ case "${2:-}" in
 esac
 
 if [[ "$MODE" == "--print" ]]; then
+  echo "=== 1/2 close_config — reclaims the config rent ==="
   cargo run -q -p admin-cli -- "$PROGRAM_ID" print "$RPC_URL" close-config
   echo
-  echo "Execute that instruction in Squads. It reclaims the config rent only."
-  echo "Once it has landed, rerun 'scripts/close.sh $ENV' to burn the program id."
+  echo "=== 2/2 loader Close — burns $PROGRAM_ID, refunds its rent ==="
+  cargo run -q -p admin-cli -- "$PROGRAM_ID" "print:$AUTHORITY" "$RPC_URL" close "$RECIPIENT"
+  echo
+  echo "Execute them in Squads IN THIS ORDER. Closing the program first strands"
+  echo "the config rent, because the config can only be closed by its own program."
+  echo "⚠️  Step 2 is irreversible: the program id can never be redeployed."
+  echo
+  echo "Afterwards, delete the PROGRAM_ID line and the comment block under it"
+  echo "from scripts/envs/$ENV.env, so the next deploy mints a fresh id."
   exit 0
 fi
 
@@ -35,7 +43,8 @@ fi
 if ! python3 scripts/on_curve.py "$AUTHORITY"; then
   echo "error: upgrade authority $AUTHORITY is a program address, not a wallet." >&2
   echo "It cannot pay a fee or sign in the browser, so this script cannot burn" >&2
-  echo "the program id. Close the program from Squads instead." >&2
+  echo "the program id directly. Run 'scripts/close.sh $ENV --print' and execute" >&2
+  echo "both printed instructions in Squads instead." >&2
   exit 1
 fi
 
@@ -79,8 +88,11 @@ if "InstructionFallbackNotFound" in logs or "Fallback functions are not supporte
 else:
     print("rejected {} {}".format(json.dumps(value["err"]), logs))
 PY
+  # Simulate at the same commitment admin-cli builds against. At the RPC's
+  # default of finalized, a program deployed or upgraded minutes ago still
+  # simulates as its previous binary, which would read as 'legacy'.
   SIM_JSON=$(curl -sS "$RPC_URL" -X POST -H "Content-Type: application/json" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"simulateTransaction\",\"params\":[\"$CB64\",{\"sigVerify\":false,\"replaceRecentBlockhash\":true,\"encoding\":\"base64\"}]}") \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"simulateTransaction\",\"params\":[\"$CB64\",{\"sigVerify\":false,\"replaceRecentBlockhash\":true,\"encoding\":\"base64\",\"commitment\":\"confirmed\"}]}") \
     || SIM_JSON=""
   SIM_VERDICT=$(printf '%s' "$SIM_JSON" | python3 -c "$CLASSIFY_SIM")
   case "$SIM_VERDICT" in

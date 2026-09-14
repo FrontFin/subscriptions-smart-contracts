@@ -144,17 +144,22 @@ program id is burned; the next deploy mints a fresh id → fresh PDA →
 existing delegations die and the backend `SmartContractAddress` must be
 updated.
 
-After `scripts/migrate-to-squads.sh`, the config admin is a Squads vault. A
-vault is a program address: it has no private key, so it can neither pay a
-transaction fee nor sign in a browser wallet. Teardown is then two steps:
+After `scripts/migrate-to-squads.sh`, the config admin and the upgrade
+authority are Squads vaults. A vault is a program address: it has no private
+key, so it can neither pay a transaction fee nor sign in a browser wallet.
+Teardown then runs from the Squads app:
 
 ```bash
-scripts/close.sh <env> --print   # prints the close_config instruction for Squads
-scripts/close.sh <env>           # after the Squads tx lands: burns the program id
+scripts/close.sh <env> --print   # prints both instructions, in execution order
 ```
 
-The script checks both signers up front and stops before anything is
-destroyed if either one is a program address.
+Execute them in the printed order — `close_config` first, then the loader
+`Close`. Closing the program first strands the config rent, because only that
+program can close its own config. Afterwards delete the `PROGRAM_ID` line and
+the comment block under it from `scripts/envs/<env>.env`.
+
+The browser-signed path checks both signers up front and stops before anything
+is destroyed if either one is a program address.
 
 ---
 

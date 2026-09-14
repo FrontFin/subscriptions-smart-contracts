@@ -73,9 +73,17 @@ while true; do
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
   [[ -n "$B64" ]] || { echo "error: could not build the upgrade transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$AUTHORITY"); then
-    BUFFER_LIVE=false
     echo "upgrade signature: $SIG"
-    solana confirm "$SIG" --url "$URL" || true
+    # The wallet returns as soon as it sends. Only a confirmed, successful
+    # transaction proves the program was upgraded and the buffer consumed, so
+    # the buffer stays flagged live until then — otherwise a dropped upgrade
+    # leaves a second way to upgrade the program and nothing says so.
+    if ! solana confirm "$SIG" --url "$URL"; then
+      echo >&2
+      echo "error: upgrade $SIG did not confirm — the program was NOT upgraded." >&2
+      break
+    fi
+    BUFFER_LIVE=false
     solana program show "$PROGRAM_ID" --url "$URL"
     echo "buffer rent was refunded to $AUTHORITY (the spill account)."
     report_stray_buffers "$AUTHORITY" "$URL" "scripts/buffers.sh $ENV --close"
@@ -86,5 +94,5 @@ while true; do
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || break
 done
 
-echo "Upgrade not executed." >&2
+echo "Upgrade did not complete." >&2
 exit 1
