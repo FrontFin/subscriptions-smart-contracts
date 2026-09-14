@@ -136,12 +136,68 @@ class SigningBridgeTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(self.bridge.reports.get(timeout=5), {})
 
+    def test_build_bridge_rejects_inputs_that_fail_validation(self):
+        for transaction, signer in ((TRANSACTION_B64, 'not base58!'),
+                                    (TRANSACTION_B64, '__TOKEN__'),
+                                    (TRANSACTION_B64, 'So111'),
+                                    ('not base64!', EXPECTED_SIGNER),
+                                    ('__TOKEN__', EXPECTED_SIGNER),
+                                    ('', EXPECTED_SIGNER)):
+            with self.subTest(transaction=transaction, signer=signer):
+                with self.assertRaises(ValueError):
+                    sign_in_browser.build_bridge(transaction, signer)
+
     def test_page_never_embeds_the_token_of_another_bridge(self):
         other = sign_in_browser.build_bridge(TRANSACTION_B64, EXPECTED_SIGNER)
         self.addCleanup(other.server.server_close)
         page = self.send('GET', self.page_path).read().decode()
         self.assertIn(self.bridge.token, page)
         self.assertNotIn(other.token, page)
+
+
+class ReportReadingTests(unittest.TestCase):
+    """The page is not trusted to return a real signature, so the result is
+    validated before it reaches the deploy scripts as stdout."""
+
+    VALID_SIGNATURE = '5' * 88
+
+    def test_a_base58_signature_is_returned(self):
+        self.assertEqual(
+            sign_in_browser.signature_from_report({'signature': self.VALID_SIGNATURE}),
+            self.VALID_SIGNATURE)
+
+    def test_a_signature_that_is_not_base58_is_rejected(self):
+        for signature in ('', 'short', '0' * 88, 'l' * 88, '5' * 89,
+                          self.VALID_SIGNATURE + '!', 'sig with spaces' * 6,
+                          'x\ny' * 40, 42, True, ['5' * 88], {'a': 1}):
+            with self.subTest(signature=signature):
+                with self.assertRaises(ValueError) as caught:
+                    sign_in_browser.signature_from_report({'signature': signature})
+                self.assertIn('not base58', str(caught.exception))
+
+    def test_a_pubkey_length_string_is_not_accepted_as_a_signature(self):
+        with self.assertRaises(ValueError):
+            sign_in_browser.signature_from_report({'signature': EXPECTED_SIGNER})
+
+    def test_a_reported_error_is_surfaced_and_truncated(self):
+        with self.assertRaises(ValueError) as caught:
+            sign_in_browser.signature_from_report({'error': 'user rejected'})
+        self.assertIn('user rejected', str(caught.exception))
+
+        with self.assertRaises(ValueError) as caught:
+            sign_in_browser.signature_from_report({'error': 'z' * 5000})
+        self.assertLess(len(str(caught.exception)), 300)
+
+    def test_an_empty_report_is_a_timeout(self):
+        with self.assertRaises(ValueError) as caught:
+            sign_in_browser.signature_from_report({})
+        self.assertIn('timed out', str(caught.exception))
+
+    def test_a_forged_signature_never_wins_over_a_reported_error(self):
+        with self.assertRaises(ValueError) as caught:
+            sign_in_browser.signature_from_report(
+                {'signature': 'forged', 'error': 'user rejected'})
+        self.assertIn('not base58', str(caught.exception))
 
 
 if __name__ == '__main__':

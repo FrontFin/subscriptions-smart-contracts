@@ -33,8 +33,16 @@ def js_literal(value):
     )
 
 
+def looks_like_base58(text, min_length, max_length):
+    return min_length <= len(text) <= max_length and set(text) <= BASE58_ALPHABET
+
+
 def looks_like_base58_pubkey(text):
-    return 32 <= len(text) <= 44 and set(text) <= BASE58_ALPHABET
+    return looks_like_base58(text, 32, 44)
+
+
+def looks_like_base58_signature(text):
+    return looks_like_base58(text, 64, 88)
 
 
 def looks_like_base64_transaction(text):
@@ -48,6 +56,18 @@ def matches_secret(candidate, expected):
     return secrets.compare_digest(
         candidate.encode("utf-8", "replace"), expected.encode("utf-8")
     )
+
+
+def signature_from_report(report):
+    signature = report.get("signature")
+    if signature is not None:
+        if isinstance(signature, str) and looks_like_base58_signature(signature):
+            return signature
+        raise ValueError("the page reported a signature that is not base58")
+    error = report.get("error")
+    if error:
+        raise ValueError(f"wallet reported: {str(error)[:200]}")
+    raise ValueError("timed out waiting for the wallet signature")
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Sign transaction</title>
@@ -154,6 +174,10 @@ class Bridge(NamedTuple):
 
 def build_bridge(unsigned_tx_b64, expected_signer) -> Bridge:
     # The secret path protects the transaction; the custom header forces a CORS preflight.
+    if not looks_like_base64_transaction(unsigned_tx_b64):
+        raise ValueError("unsigned transaction is not valid base64")
+    if not looks_like_base58_pubkey(expected_signer):
+        raise ValueError(f"expected-signer-pubkey is not base58: {expected_signer!r}")
     token = secrets.token_urlsafe(24)
     token_path = f"/{token}"
     done_path = f"{token_path}/done"
@@ -233,11 +257,10 @@ def main() -> None:
     if len(sys.argv) != 3:
         sys.exit("usage: sign_in_browser.py <base64-unsigned-tx> <expected-signer-pubkey>")
     unsigned_tx_b64, expected_signer = sys.argv[1], sys.argv[2]
-    if not looks_like_base64_transaction(unsigned_tx_b64):
-        sys.exit("error: unsigned transaction is not valid base64")
-    if not looks_like_base58_pubkey(expected_signer):
-        sys.exit(f"error: expected-signer-pubkey is not base58: {expected_signer!r}")
-    bridge = build_bridge(unsigned_tx_b64, expected_signer)
+    try:
+        bridge = build_bridge(unsigned_tx_b64, expected_signer)
+    except ValueError as exc:
+        sys.exit(f"error: {exc}")
     print(
         f"sign in your browser: {bridge.url}  (waiting up to {DEADLINE_SECONDS}s)",
         file=sys.stderr,
@@ -251,12 +274,10 @@ def main() -> None:
     bridge.server.shutdown()
     bridge.server.server_close()
 
-    if result.get("signature"):
-        print(result["signature"])
-    elif result.get("error"):
-        sys.exit(f"error: wallet reported: {result['error']}")
-    else:
-        sys.exit("error: timed out waiting for the wallet signature")
+    try:
+        print(signature_from_report(result))
+    except ValueError as exc:
+        sys.exit(f"error: {exc}")
 
 
 if __name__ == "__main__":
