@@ -952,15 +952,15 @@ fn pull_moves_funds_end_to_end_via_native_program() {
 }
 
 #[test]
-fn dust_pulls_consume_only_their_own_amount() {
+fn smallest_allowed_pulls_consume_only_their_own_amount() {
     use anchor_lang::solana_program::clock::Clock;
     use solana_account::Account;
 
     const DECIMALS: u8 = 6;
     const FUNDED: u64 = 100_000_000;
     const AMOUNT_PER_PERIOD: u64 = 50_000_000;
-    const DUST: u64 = MIN_PULL_AMOUNT;
-    const DUST_PULLS: u64 = 3;
+    const SMALLEST_PULL: u64 = MIN_PULL_AMOUNT;
+    const SMALL_PULLS: u64 = 3;
 
     let mut env = setup();
     let native_binary = include_bytes!("fixtures/subscriptions_program.so");
@@ -1063,40 +1063,43 @@ fn dust_pulls_consume_only_their_own_amount() {
         )
     };
 
-    for _ in 0..DUST_PULLS {
+    for _ in 0..SMALL_PULLS {
         env.svm.expire_blockhash();
-        send(&mut env, pull_of(DUST), &puller, &[&puller]).expect("a dust pull must succeed");
+        send(&mut env, pull_of(SMALLEST_PULL), &puller, &[&puller])
+            .expect("a smallest-allowed pull must succeed");
     }
 
     let destination = env.svm.get_account(&dest_ata).unwrap();
     assert_eq!(
         native::token_amount(&destination.data),
-        DUST * DUST_PULLS,
-        "each dust pull must move exactly its own amount"
+        SMALLEST_PULL * SMALL_PULLS,
+        "each small pull must move exactly its own amount"
     );
 
     let delegation_account = env.svm.get_account(&delegation).unwrap();
     assert_eq!(
         u64::from_le_bytes(delegation_account.data[203..211].try_into().unwrap()),
-        DUST * DUST_PULLS,
+        SMALLEST_PULL * SMALL_PULLS,
         "the period counter must meter by amount, not by pull count"
     );
 
-    env.svm.expire_blockhash();
-    let zero_err = send(&mut env, pull_of(0), &puller, &[&puller])
-        .expect_err("a zero-amount pull must be rejected");
-    let zero_logs = zero_err.meta.logs.join("\n");
-    assert!(
-        zero_logs.contains("AmountBelowMinimum"),
-        "expected AmountBelowMinimum, got:\n{zero_logs}"
-    );
+    for (amount, label) in [(0u64, "zero"), (MIN_PULL_AMOUNT - 1, "one below the floor")] {
+        env.svm.expire_blockhash();
+        let err = send(&mut env, pull_of(amount), &puller, &[&puller])
+            .expect_err("a below-minimum pull must be rejected");
+        let logs = err.meta.logs.join("\n");
+        assert!(
+            logs.contains("AmountBelowMinimum"),
+            "a {label} pull must fail AmountBelowMinimum, got:\n{logs}"
+        );
+    }
 
     env.svm.expire_blockhash();
     send(
         &mut env,
-        pull_of(AMOUNT_PER_PERIOD - DUST * DUST_PULLS),
+        pull_of(AMOUNT_PER_PERIOD - SMALLEST_PULL * SMALL_PULLS),
         &puller,
         &[&puller],
     )
-    .expect("dust must not burn the rest of the period's allowance");
+    .expect("small pulls must not burn the rest of the period's allowance");
 }

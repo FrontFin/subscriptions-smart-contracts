@@ -10,7 +10,7 @@ A stateless **signer proxy** that sits between the Mesh puller and Solana's nati
 
 The controller only authorizes who can trigger a pull; USDC moves directly from the user to the merchant via the native program.
 
-The controller holds no funds and enforces no financial rules. The native program enforces spending limits, rollover, expiry, and delegatee authorization.
+The controller holds no funds. Its only financial rule is a minimum pull of 10,000 token base units ($0.01 in six-decimal USDC), which stops a compromised puller key from burning transaction fees on pulls that move almost nothing. The native program enforces spending limits, rollover, expiry, and delegatee authorization.
 
 ```mermaid
 flowchart LR

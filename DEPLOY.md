@@ -44,8 +44,10 @@ browser wallet.
    (`PROGRAM_ID` + the PDA as a comment). **Commit that file** — everything
    in it is public, and with no registry/DB yet the committed `.env` files
    are the source of truth for what each environment runs.
-5. **Verify** with a dust-amount subscription: subscribe → auto-pull through
-  the controller → check the transfer on an explorer.
+5. **Verify** with a smallest-allowed subscription: subscribe → auto-pull
+  through the controller → check the transfer on an explorer. The pull amount
+  must be at least `MIN_PULL_AMOUNT` (10,000 base units, $0.01 in six-decimal
+  USDC); anything smaller is rejected with `AmountBelowMinimum`.
 
 
 
@@ -162,7 +164,7 @@ add members/threshold when prod needs it.
 **Testing.**
 
 ```bash
-./test.sh                       # 13 LiteSVM tests must pass
+./test.sh                       # 25 LiteSVM tests must pass
 ```
 
 The suite creates the on-chain Config itself with keypairs derived from
