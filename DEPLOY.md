@@ -118,6 +118,21 @@ Same program id, same PDA — delegations and backend config are unaffected.
 Never make the program immutable (`--final`) — upgrades are how code gets
 fixed. Binary growth is handled automatically.
 
+### Stray upgrade buffers
+
+An interrupted upgrade leaves its staged buffer on chain. The buffer holds
+rent, and while the upgrade authority owns it it is a second live way to
+upgrade the program — so check after any run that did not finish:
+
+```bash
+scripts/buffers.sh <env>            # list what the authority still holds
+scripts/buffers.sh <env> --close    # close them, rent back to the authority
+```
+
+`--close` needs the authority key, so it works only while the authority is a
+wallet you hold. Once it is a Squads vault, close the buffers from the Squads
+app instead.
+
 ## Undeploy
 
 ```bash

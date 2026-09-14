@@ -23,12 +23,25 @@ echo "   upgrade the program, and it cannot be undone from this wallet."
 echo "   The CONFIG ADMIN does not move until the vault executes accept-admin"
 echo "   (step 2 below) — until then this wallet still changes puller keys."
 echo "   Triple-check the vault address."
-read -rp "Type the LAST 4 characters of the vault address to confirm: " TAIL
-[[ "$TAIL" == "${VAULT: -4}" ]] || { echo "aborted (mismatch)"; exit 1; }
+echo
+
+if solana account "$VAULT" --url "$URL" >/dev/null 2>&1; then
+  echo "vault account     : exists on $URL"
+else
+  echo "⚠️  $VAULT does not exist on $URL yet."
+  echo "   A Squads vault is a System-owned PDA and only appears once something"
+  echo "   funds it, so this is normal for a fresh vault — but it is also what a"
+  echo "   typo looks like. Open the address in the Squads app before continuing."
+fi
+echo
+
+read -rp "Retype the FULL vault address to confirm: " TYPED
+[[ "$TYPED" == "$VAULT" ]] || { echo "aborted (mismatch)"; exit 1; }
 
 prompt_wallet "$CURRENT"
 
 echo "1/2 upgrade authority → vault..."
+# The vault cannot sign as a CLI keypair; this path relies on full-address confirmation.
 solana program set-upgrade-authority "$PROGRAM_ID" \
   --keypair "$WALLET" \
   --new-upgrade-authority "$VAULT" \

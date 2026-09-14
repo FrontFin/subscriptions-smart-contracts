@@ -1,5 +1,6 @@
-# Browser-funded temporary payer; sweep leftovers on exit. FEE_PAYER skips funding and sweep.
+# Browser-funded temporary payer; close buffers and sweep on exit. FEE_PAYER skips cleanup.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_secrets.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_buffers.sh"
 
 EPHEMERAL=""
 _EPH_SWEEP_TO=""
@@ -15,8 +16,43 @@ _eph_keep_payer_keypair() {
   SECRET_TMPFILES=(${kept[@]+"${kept[@]}"})
 }
 
+# Keep the temporary payer key past exit; sets RETAINED_PAYER_FILE.
+retain_ephemeral_payer() {
+  RETAINED_PAYER_FILE=""
+  [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" ]] || return 1
+  local pubkey rescue
+  pubkey=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || pubkey="unknown"
+  rescue="${TMPDIR:-/tmp}/mesh-retained-payer-$pubkey.json"
+  if cp "$EPHEMERAL" "$rescue" && chmod 600 "$rescue"; then
+    RETAINED_PAYER_FILE="$rescue"
+  else
+    RETAINED_PAYER_FILE="$EPHEMERAL"
+    _eph_keep_payer_keypair
+  fi
+}
+
 _eph_cleanup() {
   if [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" && -n "$_EPH_SWEEP_TO" ]]; then
+    # Close buffers before deleting their authority key.
+    local eph_pub strays listed
+    eph_pub=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || eph_pub=""
+    if [[ -n "$eph_pub" ]]; then
+      listed=true
+      strays=$(list_buffers "$eph_pub" "$_EPH_URL") || { strays=""; listed=false; }
+      [[ -z "$strays" ]] || echo "closing the write buffer this run left behind (rent → $_EPH_SWEEP_TO)..." >&2
+      if ! solana program close --buffers -k "$EPHEMERAL" --authority "$EPHEMERAL" --recipient "$_EPH_SWEEP_TO" --url "$_EPH_URL" >/dev/null 2>&1; then
+        if [[ -n "$strays" ]]; then
+          echo "⚠️  could not close it — its authority key is deleted on exit, so this rent is lost:" >&2
+          echo "$strays" >&2
+        elif [[ "$listed" == false ]]; then
+          echo "⚠️  could not close the write buffer, and could not list what $eph_pub holds," >&2
+          echo "   so there may be one. Its authority key is deleted on exit, which makes that" >&2
+          echo "   rent unrecoverable. Check what was left behind with:" >&2
+          echo "     solana program show --buffers --buffer-authority $eph_pub --url $_EPH_URL" >&2
+        fi
+      fi
+    fi
+
     # An RPC failure leaves the balance unknown; still attempt the sweep.
     local bal=""
     bal=$(solana balance -k "$EPHEMERAL" -u "$_EPH_URL" 2>/dev/null | awk '{print $1}') || bal=""
@@ -51,7 +87,7 @@ ephemeral_payer() {
   if [[ -n "${FEE_PAYER:-}" ]]; then
     [[ -f "$FEE_PAYER" ]] || { echo "error: FEE_PAYER keypair $FEE_PAYER not found" >&2; return 1; }
     PAYER_FILE="$FEE_PAYER"
-    echo "fee payer: $(solana-keygen pubkey "$PAYER_FILE") (FEE_PAYER override — no funding popup, no sweep)" >&2
+    echo "fee payer: $(solana-keygen pubkey "$PAYER_FILE") (FEE_PAYER override — no funding popup, no buffer close, no sweep)" >&2
     return 0
   fi
 

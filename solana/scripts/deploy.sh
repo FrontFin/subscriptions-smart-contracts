@@ -10,6 +10,7 @@ ENV="${1:?usage: scripts/deploy.sh <local|dev|prod>}"
 [[ "$ENV" != "test" ]] || { echo "error: 'test' is the LiteSVM fixture — never deployable (its puller keys are publicly derivable)" >&2; exit 1; }
 ENV_FILE=$(env_file "$ENV")
 UPGRADE_AUTHORITY=$(env_upgrade_authority "$ENV")
+require_pubkey "$UPGRADE_AUTHORITY" "UPGRADE_AUTHORITY in $ENV_FILE" || exit 1
 URL="mainnet-beta"
 RPC_URL="https://api.mainnet-beta.solana.com"
 
@@ -63,17 +64,68 @@ read -rp "Deploy '$ENV' to MAINNET now? Type 'deploy' to proceed: " CONFIRM
 
 ephemeral_payer "$UPGRADE_AUTHORITY" "$FUND_LAMPORTS" "$RPC_URL"
 
-solana program deploy "$ARTIFACT" \
+if ! solana program deploy "$ARTIFACT" \
   --program-id "$PROGRAM_KP" \
   --keypair "$PAYER_FILE" \
   --max-len "$MAX_LEN" \
-  --url "$URL"
+  --url "$URL"; then
+  echo >&2
+  echo "🛑 deploy failed." >&2
+  if [[ -n "${FEE_PAYER:-}" ]]; then
+    PAYER_PUBKEY=$(solana-keygen pubkey "$PAYER_FILE" 2>/dev/null) || PAYER_PUBKEY=""
+    echo "   Its write buffer (if any) belongs to the FEE_PAYER override $PAYER_FILE," >&2
+    echo "   which this script never closes or sweeps. Recover that rent yourself:" >&2
+    echo "     solana program close --buffers -k $PAYER_FILE --authority $PAYER_FILE --recipient ${PAYER_PUBKEY:-<the fee payer address>} --url $URL" >&2
+    [[ -z "$PAYER_PUBKEY" ]] || report_stray_buffers "$PAYER_PUBKEY" "$URL" \
+      "solana program close --buffers -k $PAYER_FILE --authority $PAYER_FILE --recipient $PAYER_PUBKEY --url $URL"
+  else
+    echo "   Its write buffer (if any) belongs to the temporary payer and is closed on" >&2
+    echo "   exit, so that rent comes back to $UPGRADE_AUTHORITY." >&2
+  fi
+  echo "   $ENV_FILE was NOT touched — re-running mints a fresh program id." >&2
+  echo "   The program key is discarded on exit, so if $PROGRAM_ID was already created" >&2
+  echo "   on chain it keeps the rent it holds." >&2
+  exit 1
+fi
 
+# This CLI transfer does not collect a destination signature.
+HANDOVER_REPORTED_OK=true
 solana program set-upgrade-authority "$PROGRAM_ID" \
   --keypair "$PAYER_FILE" \
   --new-upgrade-authority "$UPGRADE_AUTHORITY" \
   --skip-new-upgrade-authority-signer-check \
-  --url "$URL"
+  --url "$URL" || HANDOVER_REPORTED_OK=false
+
+ON_CHAIN_UPGRADE_AUTHORITY=$(solana program show "$PROGRAM_ID" --url "$URL" 2>/dev/null \
+  | awk '$1=="Authority:"{print $2}') || ON_CHAIN_UPGRADE_AUTHORITY=""
+if [[ "$ON_CHAIN_UPGRADE_AUTHORITY" != "$UPGRADE_AUTHORITY" ]]; then
+  PAYER_PUBKEY=$(solana-keygen pubkey "$PAYER_FILE" 2>/dev/null) || PAYER_PUBKEY=""
+  KEPT_KEY="$PAYER_FILE"
+  if [[ -z "${FEE_PAYER:-}" ]] && retain_ephemeral_payer; then
+    KEPT_KEY="$RETAINED_PAYER_FILE"
+  fi
+  echo >&2
+  echo "🛑 the upgrade authority handover did NOT take effect." >&2
+  if $HANDOVER_REPORTED_OK; then
+    echo "   The command reported success, but the program reads back with authority" >&2
+    echo "   '${ON_CHAIN_UPGRADE_AUTHORITY:-<nothing — the read itself failed>}', not $UPGRADE_AUTHORITY." >&2
+  else
+    echo "   solana program set-upgrade-authority failed." >&2
+  fi
+  echo "   $PROGRAM_ID is deployed and ${PAYER_PUBKEY:-the temporary payer} is still the only" >&2
+  echo "   key that can upgrade or close it, so that key is kept at:" >&2
+  echo "     $KEPT_KEY" >&2
+  echo "   Its balance is swept back to $UPGRADE_AUTHORITY on exit, so fund it again first:" >&2
+  [[ -z "$PAYER_PUBKEY" ]] || echo "     solana transfer $PAYER_PUBKEY 0.01 --url $URL" >&2
+  echo "   Then retry the handover:" >&2
+  echo "     solana program set-upgrade-authority $PROGRAM_ID --keypair $KEPT_KEY \\" >&2
+  echo "       --new-upgrade-authority $UPGRADE_AUTHORITY --skip-new-upgrade-authority-signer-check --url $URL" >&2
+  echo "   Or take the rent back and start over with a fresh id:" >&2
+  echo "     solana program close $PROGRAM_ID -k $KEPT_KEY --authority $KEPT_KEY --recipient $UPGRADE_AUTHORITY --url $URL" >&2
+  echo "   DELETE that key file once one of those is done." >&2
+  echo "   $ENV_FILE was NOT touched — the deployed id is $PROGRAM_ID." >&2
+  exit 1
+fi
 
 # Record the deployed ID before another step can abort and delete the throwaway key.
 PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID")
