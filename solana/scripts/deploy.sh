@@ -75,6 +75,24 @@ read -rp "Deploy '$ENV' to MAINNET now? Type 'deploy' to proceed: " CONFIRM
 
 ephemeral_payer "$UPGRADE_AUTHORITY" "$FUND_LAMPORTS" "$RPC_URL"
 
+# From here on the deploy can create the program at any moment, and until the
+# handover is confirmed the temporary payer is its only upgrade authority. The
+# trap has to be in place BEFORE the deploy starts: a Ctrl-C partway through it
+# would otherwise reach _eph_cleanup, which sweeps and deletes that key.
+AUTHORITY_MOVED=false
+_deploy_cleanup() {
+  if ! $AUTHORITY_MOVED && [[ -z "${FEE_PAYER:-}" ]] && retain_ephemeral_payer; then
+    echo >&2
+    echo "⚠️  the temporary payer may be the upgrade authority of a program this run" >&2
+    echo "   already created. Its key is kept at: $RETAINED_PAYER_FILE" >&2
+    echo "   Without that key such a program can never be upgraded or closed." >&2
+    echo "   Check with: solana program show $PROGRAM_ID --url $URL" >&2
+    echo "   DELETE the file once you have confirmed it is not needed." >&2
+  fi
+  _eph_cleanup
+}
+trap _deploy_cleanup EXIT INT TERM
+
 if ! solana program deploy "$ARTIFACT" \
   --program-id "$PROGRAM_KP" \
   --keypair "$PAYER_FILE" \
@@ -107,22 +125,6 @@ if ! solana program deploy "$ARTIFACT" \
   exit 1
 fi
 
-# From here the program exists and the temporary payer is its upgrade
-# authority. A Ctrl-C during the handover would otherwise reach _eph_cleanup
-# directly, which sweeps and deletes that key and strands the program.
-AUTHORITY_MOVED=false
-_deploy_cleanup() {
-  if ! $AUTHORITY_MOVED && [[ -z "${FEE_PAYER:-}" ]] && retain_ephemeral_payer; then
-    echo >&2
-    echo "⚠️  $PROGRAM_ID is deployed and the temporary payer is still its upgrade" >&2
-    echo "   authority. Its key is kept at: $RETAINED_PAYER_FILE" >&2
-    echo "   Without that key the program can never be upgraded or closed." >&2
-    echo "   DELETE it once the authority is $UPGRADE_AUTHORITY." >&2
-  fi
-  _eph_cleanup
-}
-trap _deploy_cleanup EXIT INT TERM
-
 # This CLI transfer does not collect a destination signature.
 HANDOVER_REPORTED_OK=true
 solana program set-upgrade-authority "$PROGRAM_ID" \
@@ -131,7 +133,10 @@ solana program set-upgrade-authority "$PROGRAM_ID" \
   --skip-new-upgrade-authority-signer-check \
   --url "$URL" || HANDOVER_REPORTED_OK=false
 
-ON_CHAIN_UPGRADE_AUTHORITY=$(solana program show "$PROGRAM_ID" --url "$URL" 2>/dev/null \
+# Read at the same commitment the deploy and handover were confirmed at.
+# The CLI default is finalized, which lags and can still show the temporary
+# payer after a handover that actually landed.
+ON_CHAIN_UPGRADE_AUTHORITY=$(solana program show "$PROGRAM_ID" --url "$URL" --commitment confirmed 2>/dev/null \
   | awk '$1=="Authority:"{print $2}') || ON_CHAIN_UPGRADE_AUTHORITY=""
 if [[ "$ON_CHAIN_UPGRADE_AUTHORITY" != "$UPGRADE_AUTHORITY" ]]; then
   PAYER_PUBKEY=$(solana-keygen pubkey "$PAYER_FILE" 2>/dev/null) || PAYER_PUBKEY=""

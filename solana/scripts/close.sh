@@ -174,7 +174,7 @@ fi
 # same words. A genuine account-absent answer names this program id, and a
 # gateway failure does not.
 if ! grep -q -- "$PROGRAM_ID" <<<"$SHOW_STATE" \
-  || ! grep -qiE 'has been closed|unable to find|does not exist|no account' <<<"$SHOW_STATE"; then
+  || ! grep -qiE 'has been closed|accountnotfound|not found|unable to find|does not exist' <<<"$SHOW_STATE"; then
   echo "error: could not confirm that $PROGRAM_ID is closed." >&2
   echo "PROGRAM_ID stays in scripts/envs/$ENV.env — erasing it while the program" >&2
   echo "may still be live would lose the only record of its address." >&2
