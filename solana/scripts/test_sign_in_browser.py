@@ -18,6 +18,8 @@ import sign_in_browser
 
 TRANSACTION_B64 = base64.b64encode(b'unsigned-transaction-bytes').decode()
 EXPECTED_SIGNER = 'So11111111111111111111111111111111111111112'
+REAL_DEVNET_SIGNATURE = ('2VCoSZduGXRukPiUug9LAAnaPywjW5AeFu1rR4BXj5cGt'
+                         'UodWvneXtcyXDVCWrbsrADknB8neZGUwLDfNeicXJwo')
 
 
 class SigningBridgeTests(unittest.TestCase):
@@ -165,6 +167,7 @@ class ReportReadingTests(unittest.TestCase):
 
     def test_a_signature_that_is_not_base58_is_rejected(self):
         for signature in ('', 'short', '0' * 88, 'l' * 88, '5' * 89,
+                          'z' * 88, 'z' * 64, '1' * 63, '1' * 65,
                           self.VALID_SIGNATURE + '!', 'sig with spaces' * 6,
                           'x\ny' * 40, 42, True, ['5' * 88], {'a': 1}):
             with self.subTest(signature=signature):
@@ -175,6 +178,23 @@ class ReportReadingTests(unittest.TestCase):
     def test_a_pubkey_length_string_is_not_accepted_as_a_signature(self):
         with self.assertRaises(ValueError):
             sign_in_browser.signature_from_report({'signature': EXPECTED_SIGNER})
+
+    def test_only_values_that_decode_to_64_bytes_are_signatures(self):
+        for text in (REAL_DEVNET_SIGNATURE, '5' * 88, '1' * 64):
+            with self.subTest(text=text):
+                self.assertEqual(sign_in_browser.base58_decoded_length(text), 64)
+                self.assertTrue(sign_in_browser.looks_like_base58_signature(text))
+        for text, decoded in (('z' * 88, 65), ('z' * 64, 47), ('1' * 65, 65)):
+            with self.subTest(text=text[0] * 3 + str(len(text))):
+                self.assertEqual(sign_in_browser.base58_decoded_length(text), decoded)
+                self.assertFalse(sign_in_browser.looks_like_base58_signature(text))
+
+    def test_only_values_that_decode_to_32_bytes_are_pubkeys(self):
+        self.assertEqual(sign_in_browser.base58_decoded_length(EXPECTED_SIGNER), 32)
+        self.assertTrue(sign_in_browser.looks_like_base58_pubkey(EXPECTED_SIGNER))
+        for text in ('z' * 44, REAL_DEVNET_SIGNATURE, '1' * 31):
+            with self.subTest(text=text[:8]):
+                self.assertFalse(sign_in_browser.looks_like_base58_pubkey(text))
 
     def test_a_reported_error_is_surfaced_and_truncated(self):
         with self.assertRaises(ValueError) as caught:

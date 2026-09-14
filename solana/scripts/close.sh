@@ -45,11 +45,14 @@ if [[ -n "$CONFIG_ADMIN" ]]; then
   if [[ "$SIM_ERR" == "None" ]]; then
     echo "reclaiming config rent (admin $CONFIG_ADMIN)..."
     if CSIG=$(python3 scripts/sign_in_browser.py "$CB64" "$CONFIG_ADMIN"); then
-      echo "config closed: $CSIG"
-      confirm_signature "$CSIG" "$URL" ||
-        echo "⚠️  config close did not confirm — its rent (~0.0035 SOL) may be orphaned." >&2
+      echo "config close signature: $CSIG"
+      confirm_signature "$CSIG" "$URL" || {
+        echo "error: the config close did not land. Closing the program now would leave the Config account owned by a program that no longer exists — unclosable forever. Stopping; the program is untouched, so re-run once the config close confirms." >&2
+        exit 1
+      }
     else
-      echo "⚠️  config close not signed — its rent (~0.0035 SOL) will be orphaned." >&2
+      echo "error: config close not signed. Closing the program now would leave the Config account unclosable forever. Stopping; the program is untouched." >&2
+      exit 1
     fi
   else
     echo "config-rent reclaim unavailable (deployed program has no close_config, or config already gone) — skipping; ~0.0035 SOL orphaned."

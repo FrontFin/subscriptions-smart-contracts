@@ -21,7 +21,8 @@ from typing import NamedTuple
 
 MAX_REPORT_BYTES = 64 * 1024
 DEADLINE_SECONDS = 180
-BASE58_ALPHABET = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+BASE58_DIGITS = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+BASE58_ALPHABET = set(BASE58_DIGITS)
 
 
 def js_literal(value):
@@ -33,16 +34,28 @@ def js_literal(value):
     )
 
 
-def looks_like_base58(text, min_length, max_length):
-    return min_length <= len(text) <= max_length and set(text) <= BASE58_ALPHABET
+def base58_decoded_length(text):
+    value = 0
+    for character in text:
+        value = value * 58 + BASE58_DIGITS.index(character)
+    leading_zeros = len(text) - len(text.lstrip("1"))
+    return leading_zeros + (value.bit_length() + 7) // 8
+
+
+def looks_like_base58(text, decoded_length):
+    if not 1 <= len(text) <= decoded_length * 2:
+        return False
+    if not set(text) <= BASE58_ALPHABET:
+        return False
+    return base58_decoded_length(text) == decoded_length
 
 
 def looks_like_base58_pubkey(text):
-    return looks_like_base58(text, 32, 44)
+    return looks_like_base58(text, 32)
 
 
 def looks_like_base58_signature(text):
-    return looks_like_base58(text, 64, 88)
+    return looks_like_base58(text, 64)
 
 
 def looks_like_base64_transaction(text):
