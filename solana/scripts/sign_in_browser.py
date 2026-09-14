@@ -17,6 +17,7 @@ import secrets
 import sys
 import threading
 import webbrowser
+from typing import NamedTuple
 
 MAX_REPORT_BYTES = 64 * 1024
 DEADLINE_SECONDS = 180
@@ -143,14 +144,15 @@ setTimeout(() => {
 """
 
 
-def main() -> None:
-    if len(sys.argv) != 3:
-        sys.exit("usage: sign_in_browser.py <base64-unsigned-tx> <expected-signer-pubkey>")
-    unsigned_tx_b64, expected_signer = sys.argv[1], sys.argv[2]
-    if not looks_like_base64_transaction(unsigned_tx_b64):
-        sys.exit("error: unsigned transaction is not valid base64")
-    if not looks_like_base58_pubkey(expected_signer):
-        sys.exit(f"error: expected-signer-pubkey is not base58: {expected_signer!r}")
+class Bridge(NamedTuple):
+    server: http.server.ThreadingHTTPServer
+    url: str
+    token: str
+    done_path: str
+    reports: queue.Queue
+
+
+def build_bridge(unsigned_tx_b64, expected_signer) -> Bridge:
     # The secret path protects the transaction; the custom header forces a CORS preflight.
     token = secrets.token_urlsafe(24)
     token_path = f"/{token}"
@@ -216,19 +218,36 @@ def main() -> None:
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
     allowed_origins.update({f"http://127.0.0.1:{port}", f"http://localhost:{port}"})
-    url = f"http://127.0.0.1:{port}{token_path}"
+    return Bridge(
+        server=server,
+        url=f"http://127.0.0.1:{port}{token_path}",
+        token=token,
+        done_path=done_path,
+        reports=reports,
+    )
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        sys.exit("usage: sign_in_browser.py <base64-unsigned-tx> <expected-signer-pubkey>")
+    unsigned_tx_b64, expected_signer = sys.argv[1], sys.argv[2]
+    if not looks_like_base64_transaction(unsigned_tx_b64):
+        sys.exit("error: unsigned transaction is not valid base64")
+    if not looks_like_base58_pubkey(expected_signer):
+        sys.exit(f"error: expected-signer-pubkey is not base58: {expected_signer!r}")
+    bridge = build_bridge(unsigned_tx_b64, expected_signer)
     print(
-        f"sign in your browser: {url}  (waiting up to {DEADLINE_SECONDS}s)",
+        f"sign in your browser: {bridge.url}  (waiting up to {DEADLINE_SECONDS}s)",
         file=sys.stderr,
     )
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    webbrowser.open(url)
+    threading.Thread(target=bridge.server.serve_forever, daemon=True).start()
+    webbrowser.open(bridge.url)
     try:
-        result = reports.get(timeout=DEADLINE_SECONDS)
+        result = bridge.reports.get(timeout=DEADLINE_SECONDS)
     except queue.Empty:
         result = {}
-    server.shutdown()
-    server.server_close()
+    bridge.server.shutdown()
+    bridge.server.server_close()
 
     if result.get("signature"):
         print(result["signature"])
