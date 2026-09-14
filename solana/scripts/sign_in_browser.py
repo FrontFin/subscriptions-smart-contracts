@@ -72,15 +72,20 @@ def matches_secret(candidate, expected):
 
 
 def signature_from_report(report):
-    signature = report.get("signature")
-    if signature is not None:
-        if isinstance(signature, str) and looks_like_base58_signature(signature):
-            return signature
-        raise ValueError("the page reported a signature that is not base58")
     error = report.get("error")
+    signature = report.get("signature")
     if error:
+        if signature is not None:
+            raise ValueError(
+                "the page reported a signature and an error together, so the "
+                f"result is not trustworthy: {str(error)[:200]}"
+            )
         raise ValueError(f"wallet reported: {str(error)[:200]}")
-    raise ValueError("timed out waiting for the wallet signature")
+    if signature is None:
+        raise ValueError("timed out waiting for the wallet signature")
+    if isinstance(signature, str) and looks_like_base58_signature(signature):
+        return signature
+    raise ValueError("the page reported a signature that is not base58")
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Sign transaction</title>

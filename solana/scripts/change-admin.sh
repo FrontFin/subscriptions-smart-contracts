@@ -50,7 +50,7 @@ while true; do
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$SIGNER"); then
     echo "signature: $SIG"
     confirm_signature "$SIG" "$RPC_URL" || {
-      echo "error: the admin change was NOT applied — the on-chain config is unchanged." >&2
+      echo "error: the admin change was not confirmed — check the signature above, then read the current admin with admin-cli show before re-running." >&2
       exit 1
     }
     cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show || true

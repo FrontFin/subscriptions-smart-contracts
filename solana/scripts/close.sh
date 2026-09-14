@@ -68,7 +68,7 @@ while true; do
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$AUTHORITY"); then
     echo "close signature: $SIG"
     confirm_signature "$SIG" "$URL" || {
-      echo "error: the program was NOT closed — its rent was not reclaimed." >&2
+      echo "error: the program close was not confirmed — check the signature above before re-running." >&2
       exit 1
     }
     break

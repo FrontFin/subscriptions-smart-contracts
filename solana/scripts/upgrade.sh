@@ -72,7 +72,7 @@ while true; do
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$AUTHORITY"); then
     echo "upgrade signature: $SIG"
     confirm_signature "$SIG" "$URL" || {
-      echo "error: the upgrade was NOT applied — the staged buffer $BUFFER still exists (authority: $AUTHORITY)." >&2
+      echo "error: the upgrade was not confirmed. If it did land, the buffer $BUFFER is already consumed — check the signature above before re-running, or you will stage a second buffer." >&2
       exit 1
     }
     solana program show "$PROGRAM_ID" --url "$URL"

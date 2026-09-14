@@ -210,11 +210,21 @@ class ReportReadingTests(unittest.TestCase):
             sign_in_browser.signature_from_report({})
         self.assertIn('timed out', str(caught.exception))
 
-    def test_a_forged_signature_never_wins_over_a_reported_error(self):
-        with self.assertRaises(ValueError) as caught:
-            sign_in_browser.signature_from_report(
-                {'signature': 'forged', 'error': 'user rejected'})
-        self.assertIn('not base58', str(caught.exception))
+    def test_a_valid_signature_never_wins_over_a_reported_error(self):
+        for signature in (self.VALID_SIGNATURE, REAL_DEVNET_SIGNATURE, 'forged', ''):
+            with self.subTest(signature=signature):
+                with self.assertRaises(ValueError) as caught:
+                    sign_in_browser.signature_from_report(
+                        {'signature': signature, 'error': 'user rejected'})
+                self.assertIn('error', str(caught.exception))
+
+    def test_an_empty_error_does_not_block_a_good_signature(self):
+        for empty in ('', None, 0):
+            with self.subTest(error=empty):
+                self.assertEqual(
+                    sign_in_browser.signature_from_report(
+                        {'signature': self.VALID_SIGNATURE, 'error': empty}),
+                    self.VALID_SIGNATURE)
 
 
 if __name__ == '__main__':
