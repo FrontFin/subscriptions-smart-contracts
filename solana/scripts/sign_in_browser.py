@@ -74,7 +74,7 @@ def matches_secret(candidate, expected):
 def signature_from_report(report):
     error = report.get("error")
     signature = report.get("signature")
-    if error:
+    if "error" in report:
         if signature is not None:
             raise ValueError(
                 "the page reported a signature and an error together, so the "

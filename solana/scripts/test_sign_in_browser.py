@@ -218,13 +218,19 @@ class ReportReadingTests(unittest.TestCase):
                         {'signature': signature, 'error': 'user rejected'})
                 self.assertIn('error', str(caught.exception))
 
-    def test_an_empty_error_does_not_block_a_good_signature(self):
-        for empty in ('', None, 0):
-            with self.subTest(error=empty):
-                self.assertEqual(
+    def test_a_falsy_error_still_disqualifies_the_signature(self):
+        for falsy in ('', None, 0, False, 0.0, [], {}):
+            with self.subTest(error=falsy):
+                with self.assertRaises(ValueError) as caught:
                     sign_in_browser.signature_from_report(
-                        {'signature': self.VALID_SIGNATURE, 'error': empty}),
-                    self.VALID_SIGNATURE)
+                        {'signature': self.VALID_SIGNATURE, 'error': falsy})
+                self.assertIn('together', str(caught.exception))
+
+    def test_a_report_with_no_error_key_is_accepted(self):
+        self.assertEqual(
+            sign_in_browser.signature_from_report(
+                {'signature': self.VALID_SIGNATURE, 'unknown_field': 'x'}),
+            self.VALID_SIGNATURE)
 
 
 if __name__ == '__main__':
