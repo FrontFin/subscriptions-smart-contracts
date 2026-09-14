@@ -28,6 +28,17 @@ if [[ "$ON_CHAIN_AUTHORITY" != "$VAULT" ]]; then
   exit 1
 fi
 
+# Everything below prints Squads instructions and hands the buffer to $VAULT.
+# A wallet key there means the migration never happened, so the operator would
+# be told to approve in Squads for an authority that still signs on its own.
+require_pubkey "$VAULT" "UPGRADE_AUTHORITY" || exit 1
+if python3 scripts/on_curve.py "$VAULT"; then
+  echo "error: the upgrade authority $VAULT is an ordinary wallet, not a vault." >&2
+  echo "       Use scripts/upgrade.sh $ENV for a wallet-held authority, or run" >&2
+  echo "       scripts/migrate-to-squads.sh $ENV <vault> first. Nothing was staged." >&2
+  exit 1
+fi
+
 scripts/build.sh "$ENV"
 ARTIFACT="target/deploy-$ENV/subscription_controller.so"
 SIZE=$(stat -f%z "$ARTIFACT" 2>/dev/null || stat -c%s "$ARTIFACT")

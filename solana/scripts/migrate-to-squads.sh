@@ -18,9 +18,16 @@ RPC_URL="https://api.mainnet-beta.solana.com"
 # below is irreversible.
 require_pubkey "$VAULT" "vault address" || exit 1
 
-# A Squads vault is a program address. An ordinary wallet key would be accepted
-# by every step below and made the permanent upgrade authority, while the rest
-# of the tooling would keep treating it as a vault.
+# A Squads vault is a program address, so a wallet key here is certainly wrong
+# and is the likely mistake: it would become the permanent upgrade authority
+# while the rest of the tooling kept treating it as a vault.
+#
+# This rules out a wallet key and NOTHING MORE. A vault is derived from its
+# multisig address and is System-owned, so with only the vault address there is
+# nothing to derive and compare — any other program address passes here too,
+# and one that no Squad controls would leave the program permanently
+# unupgradeable. Retyping the address in full and opening it in the Squads app
+# are the checks that catch that; they are not optional.
 if python3 scripts/on_curve.py "$VAULT"; then
   echo "error: $VAULT is an ordinary wallet address, not a Squads vault." >&2
   echo "A vault is a program address and has no private key. Copy the vault" >&2
@@ -60,7 +67,12 @@ echo "⚠️  ONE-WAY for the UPGRADE AUTHORITY: after step 1 only the Squad can
 echo "   upgrade the program, and it cannot be undone from this wallet."
 echo "   The CONFIG ADMIN does not move until the vault executes accept-admin"
 echo "   (step 2 below) — until then this wallet still changes puller keys."
-echo "   Triple-check the vault address."
+echo
+echo "   This script has checked that $VAULT is a program address, not a"
+echo "   wallet. It CANNOT check that a Squad controls it — that is not"
+echo "   derivable from the address alone. If no Squad does, the program can"
+echo "   never be upgraded or closed again. Open the address in the Squads app"
+echo "   and confirm you can propose a transaction from it BEFORE continuing."
 echo
 
 if solana account "$VAULT" --url "$URL" >/dev/null 2>&1; then
