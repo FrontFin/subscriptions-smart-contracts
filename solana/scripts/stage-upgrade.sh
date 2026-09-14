@@ -64,10 +64,23 @@ BUFFER=$(solana program write-buffer "$ARTIFACT" --keypair "$FEE_PAYER" --url "$
 [[ -n "$BUFFER" ]] || { echo "error: buffer address not captured" >&2; exit 1; }
 echo "buffer: $BUFFER"
 if ! solana program set-buffer-authority "$BUFFER" --new-buffer-authority "$VAULT" --keypair "$FEE_PAYER" --url "$URL"; then
-  echo "error: buffer $BUFFER could not be handed to $VAULT — closing it so its rent comes back." >&2
+  # The handoff is an on-chain transaction, so a non-zero result can also mean
+  # it landed and only the reply was lost. Closing as the fee payer would then
+  # fail, and telling the operator the fee payer still owns it would send them
+  # looking in the wrong place while a live upgrade buffer sits in the vault.
+  echo "error: the handoff of buffer $BUFFER to $VAULT reported failure." >&2
+  BUFFER_INFO=$(solana program show --buffers --buffer-authority "$VAULT" --url "$URL" 2>/dev/null) || BUFFER_INFO=""
+  if grep -q "$BUFFER" <<<"$BUFFER_INFO"; then
+    echo "   It actually LANDED: $VAULT owns the buffer now, so the fee payer cannot" >&2
+    echo "   close it. Either finish the upgrade in Squads with this buffer, or close" >&2
+    echo "   it from the Squads app. Do not re-run before deciding — that stages another." >&2
+    exit 1
+  fi
+  echo "   The vault does not own it, so closing it as the fee payer to recover the rent." >&2
   solana program close "$BUFFER" -k "$FEE_PAYER" --authority "$FEE_PAYER" --recipient "$FEE_PAYER_PUBKEY" --url "$URL" || {
-    echo "⚠️  the close failed too. Buffer $BUFFER still holds rent and the fee payer still" >&2
-    echo "   owns it. Retry with:" >&2
+    echo "⚠️  the close failed too. Buffer $BUFFER still holds rent." >&2
+    echo "   Check who owns it before retrying — the handoff result was ambiguous:" >&2
+    echo "     scripts/buffers.sh $ENV" >&2
     echo "     solana program close $BUFFER -k $FEE_PAYER --authority $FEE_PAYER --recipient $FEE_PAYER_PUBKEY --url $URL" >&2
   }
   exit 1
