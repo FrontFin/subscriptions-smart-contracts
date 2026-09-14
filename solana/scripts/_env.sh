@@ -20,9 +20,11 @@ try:
     result = json.load(sys.stdin)
 except Exception:
     print("unreachable"); raise SystemExit
+if not isinstance(result, dict) or "confirmationStatus" not in result:
+    print("unreachable"); raise SystemExit
 if result.get("err") is not None:
     print("failed", json.dumps(result["err"])); raise SystemExit
-print("landed" if result.get("confirmationStatus") in enough else "pending")
+print("landed" if result["confirmationStatus"] in enough else "pending")
 ') || verdict="unreachable"
     else
       verdict="unreachable"

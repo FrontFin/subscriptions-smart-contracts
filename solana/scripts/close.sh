@@ -33,9 +33,10 @@ read -rp "Type 'close' to proceed: " CONFIRM
 # (closing the program first would orphan it). Signed by the CURRENT on-chain
 # admin — which may differ from the upgrade authority after a handover.
 CONFIG_PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID" config)
-CONFIG_PRESENT=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$CONFIG_PDA\",{\"encoding\":\"base64\",\"commitment\":\"confirmed\"}]}" \
-  | python3 -c '
+config_account_state() {
+  curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$CONFIG_PDA\",{\"encoding\":\"base64\",\"commitment\":\"$1\"}]}" \
+    | python3 -c '
 import json, sys
 try:
     body = json.load(sys.stdin)
@@ -47,10 +48,20 @@ result = body.get("result")
 if not isinstance(result, dict) or "value" not in result:
     print("unreadable"); raise SystemExit
 print("absent" if result["value"] is None else "present")
-' 2>/dev/null) || CONFIG_PRESENT="unreadable"
-if [[ "$CONFIG_PRESENT" == "unreadable" ]]; then
-  echo "error: could not read the config account $CONFIG_PDA. Closing the program without knowing whether a live Config exists could orphan it forever, so stopping. The program is untouched." >&2
+' 2>/dev/null || echo "unreadable"
+}
+# Absence has to hold on both views: the confirmed fork can still roll back,
+# and the finalized view can lag behind an account this deploy just created.
+CONFIG_AT_CONFIRMED=$(config_account_state confirmed)
+CONFIG_AT_FINALIZED=$(config_account_state finalized)
+if [[ "$CONFIG_AT_CONFIRMED" == "unreadable" || "$CONFIG_AT_FINALIZED" == "unreadable" ]]; then
+  echo "error: could not read the config account $CONFIG_PDA (confirmed=$CONFIG_AT_CONFIRMED finalized=$CONFIG_AT_FINALIZED). Closing the program without knowing whether a live Config exists could orphan it forever, so stopping. The program is untouched." >&2
   exit 1
+fi
+if [[ "$CONFIG_AT_CONFIRMED" == "absent" && "$CONFIG_AT_FINALIZED" == "absent" ]]; then
+  CONFIG_PRESENT="absent"
+else
+  CONFIG_PRESENT="present"
 fi
 if [[ "$CONFIG_PRESENT" == "present" ]]; then
   CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null \
