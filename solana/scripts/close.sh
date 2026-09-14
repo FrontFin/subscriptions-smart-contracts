@@ -180,9 +180,9 @@ if ! grep -qiE 'unable to find|not found|does not exist|no account' <<<"$SHOW_ST
 fi
 
 # Rename a sibling temp file atomically, preserving the original mode and avoiding truncation.
-SCRUBBED="scripts/envs/$ENV.env.tmp.$$"
+SCRUBBED=$(mktemp "scripts/envs/.$ENV.env.tmp.XXXXXX")
 trap 'rm -f "$SCRUBBED"' EXIT
-cp -p "scripts/envs/$ENV.env" "$SCRUBBED"
+chmod --reference="scripts/envs/$ENV.env" "$SCRUBBED" 2>/dev/null || chmod 644 "$SCRUBBED"
 sed \
   -e '/^PROGRAM_ID=/d' \
   -e '/^# \^ the smart contract address/d' \
