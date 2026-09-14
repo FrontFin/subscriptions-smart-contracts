@@ -108,9 +108,11 @@ while true; do
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
   [[ -n "$B64" ]] || { echo "error: could not build the initialize transaction" >&2; break; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$UPGRADE_AUTHORITY"); then
-    echo "config initialized: $SIG"
-    INITIALIZED=true
-    break
+    echo "initialize signature: $SIG"
+    if confirm_signature "$SIG" "$URL"; then
+      INITIALIZED=true
+      break
+    fi
   fi
   read -rp "Config not initialized (rejected or blockhash expired). Retry? [y/N] " AGAIN
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || break

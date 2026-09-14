@@ -46,7 +46,8 @@ if [[ -n "$CONFIG_ADMIN" ]]; then
     echo "reclaiming config rent (admin $CONFIG_ADMIN)..."
     if CSIG=$(python3 scripts/sign_in_browser.py "$CB64" "$CONFIG_ADMIN"); then
       echo "config closed: $CSIG"
-      solana confirm "$CSIG" --url "$URL" >/dev/null 2>&1 || true
+      confirm_signature "$CSIG" "$URL" ||
+        echo "⚠️  config close did not confirm — its rent (~0.0035 SOL) may be orphaned." >&2
     else
       echo "⚠️  config close not signed — its rent (~0.0035 SOL) will be orphaned." >&2
     fi
@@ -63,7 +64,10 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the close transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$AUTHORITY"); then
     echo "close signature: $SIG"
-    solana confirm "$SIG" --url "$URL" || true
+    confirm_signature "$SIG" "$URL" || {
+      echo "error: the program was NOT closed — its rent was not reclaimed." >&2
+      exit 1
+    }
     break
   fi
   echo

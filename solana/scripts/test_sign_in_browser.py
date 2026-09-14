@@ -156,9 +156,6 @@ class SigningBridgeTests(unittest.TestCase):
 
 
 class ReportReadingTests(unittest.TestCase):
-    """The page is not trusted to return a real signature, so the result is
-    validated before it reaches the deploy scripts as stdout."""
-
     VALID_SIGNATURE = '5' * 88
 
     def test_a_base58_signature_is_returned(self):

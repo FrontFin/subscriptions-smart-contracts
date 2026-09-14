@@ -49,7 +49,10 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$SIGNER"); then
     echo "signature: $SIG"
-    solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1 || sleep 2
+    confirm_signature "$SIG" "$RPC_URL" || {
+      echo "error: the admin change was NOT applied — the on-chain config is unchanged." >&2
+      exit 1
+    }
     cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show || true
     [[ "$STEP" == "accept" ]] && echo "Handover complete — update UPGRADE_AUTHORITY in scripts/envs/$ENV.env to $NEW_ADMIN"
     exit 0
