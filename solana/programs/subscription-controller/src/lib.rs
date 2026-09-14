@@ -175,6 +175,17 @@ pub mod subscription_controller {
             ControllerError::UnexpectedNativeInstruction
         );
 
+        // The length check above makes the amount slice safe.
+        let amount = u64::from_le_bytes(
+            native_data[NATIVE_PULL_AMOUNT_OFFSET..NATIVE_PULL_AMOUNT_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+        require!(
+            amount >= MIN_PULL_AMOUNT,
+            ControllerError::AmountBelowMinimum
+        );
+
         let delegate_key = ctx.accounts.delegate.key();
         let metas: Vec<AccountMeta> = ctx
             .remaining_accounts

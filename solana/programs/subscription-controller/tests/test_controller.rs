@@ -11,7 +11,7 @@ use {
     solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
     solana_transaction::versioned::VersionedTransaction,
-    subscription_controller::{CONFIG_SEED, DELEGATE_SEED, SUBSCRIPTIONS_PROGRAM},
+    subscription_controller::{CONFIG_SEED, DELEGATE_SEED, MIN_PULL_AMOUNT, SUBSCRIPTIONS_PROGRAM},
 };
 
 fn fixture_puller_keypairs() -> [Keypair; 2] {
@@ -33,8 +33,10 @@ struct Env {
 
 /// Native pull_payment: discriminator (1) + amount (8) + delegator (32) + mint (32).
 fn valid_native_pull_data() -> Vec<u8> {
+    // Use a valid amount so authorization tests reach CPI instead of failing the minimum check.
     let mut d = vec![5u8];
-    d.extend(std::iter::repeat(0u8).take(72));
+    d.extend_from_slice(&MIN_PULL_AMOUNT.to_le_bytes());
+    d.extend(std::iter::repeat(0u8).take(64));
     d
 }
 
@@ -540,6 +542,55 @@ fn pull_gate_passes_for_every_listed_puller_key() {
 }
 
 #[test]
+fn pull_rejects_amounts_below_the_minimum() {
+    let pull_data_of = |amount: u64| {
+        let mut d = vec![5u8];
+        d.extend_from_slice(&amount.to_le_bytes());
+        d.extend(std::iter::repeat(0u8).take(64));
+        d
+    };
+
+    for amount in [0, 1, MIN_PULL_AMOUNT - 1] {
+        let mut env = setup();
+        let puller = env.pullers[0].insecure_clone();
+        env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+
+        let ix = pull_ix_data(
+            &env,
+            puller.pubkey(),
+            SUBSCRIPTIONS_PROGRAM,
+            pull_data_of(amount),
+        );
+        let err = send(&mut env, ix, &puller, &[&puller])
+            .expect_err("an amount below the floor must not be forwarded");
+        let logs = err.meta.logs.join("\n");
+        assert!(
+            logs.contains("AmountBelowMinimum"),
+            "amount {amount} must be rejected by the floor, got:\n{logs}"
+        );
+    }
+
+    // The native program is absent, so reaching CPI proves the minimum check passed.
+    let mut env = setup();
+    let puller = env.pullers[0].insecure_clone();
+    env.svm.airdrop(&puller.pubkey(), 1_000_000_000).unwrap();
+    let ix = pull_ix_data(
+        &env,
+        puller.pubkey(),
+        SUBSCRIPTIONS_PROGRAM,
+        pull_data_of(MIN_PULL_AMOUNT),
+    );
+    let err = send(&mut env, ix, &puller, &[&puller])
+        .expect_err("CPI into a non-deployed program cannot succeed in LiteSVM");
+    let logs = err.meta.logs.join("\n");
+    assert!(!logs.is_empty(), "the pull must reach execution");
+    assert!(
+        !logs.contains("AmountBelowMinimum"),
+        "exactly MIN_PULL_AMOUNT must clear the floor, got:\n{logs}"
+    );
+}
+
+#[test]
 fn pull_requires_puller_key_signature() {
     let mut env = setup();
 
@@ -908,7 +959,7 @@ fn dust_pulls_consume_only_their_own_amount() {
     const DECIMALS: u8 = 6;
     const FUNDED: u64 = 100_000_000;
     const AMOUNT_PER_PERIOD: u64 = 50_000_000;
-    const DUST: u64 = 1;
+    const DUST: u64 = MIN_PULL_AMOUNT;
     const DUST_PULLS: u64 = 3;
 
     let mut env = setup();
@@ -1032,8 +1083,13 @@ fn dust_pulls_consume_only_their_own_amount() {
     );
 
     env.svm.expire_blockhash();
-    send(&mut env, pull_of(0), &puller, &[&puller])
-        .expect_err("the native program must reject a zero-amount pull");
+    let zero_err = send(&mut env, pull_of(0), &puller, &[&puller])
+        .expect_err("a zero-amount pull must be rejected");
+    let zero_logs = zero_err.meta.logs.join("\n");
+    assert!(
+        zero_logs.contains("AmountBelowMinimum"),
+        "expected AmountBelowMinimum, got:\n{zero_logs}"
+    );
 
     env.svm.expire_blockhash();
     send(
