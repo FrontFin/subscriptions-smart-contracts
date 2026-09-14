@@ -170,7 +170,11 @@ if $SHOW_OK; then
   echo "Check signature $SIG, then rerun this script." >&2
   exit 1
 fi
-if ! grep -qiE 'unable to find|not found|does not exist|no account' <<<"$SHOW_STATE"; then
+# The absence phrase alone is not enough: an RPC or proxy error can carry the
+# same words. A genuine account-absent answer names this program id, and a
+# gateway failure does not.
+if ! grep -q -- "$PROGRAM_ID" <<<"$SHOW_STATE" \
+  || ! grep -qiE 'has been closed|unable to find|does not exist|no account' <<<"$SHOW_STATE"; then
   echo "error: could not confirm that $PROGRAM_ID is closed." >&2
   echo "PROGRAM_ID stays in scripts/envs/$ENV.env — erasing it while the program" >&2
   echo "may still be live would lose the only record of its address." >&2
