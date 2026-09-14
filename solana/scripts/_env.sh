@@ -26,6 +26,21 @@ PY
   return 1
 }
 
+# Prints "wallet" for a key that can sign, "program" for a program address.
+# Returns non-zero on anything else, which the caller must treat as fatal:
+# every caller gates an irreversible operation on the answer, and a classifier
+# that failed to run is not a passed check. The verdict is the printed word,
+# never the exit status — a crashed interpreter also exits 1, so a status-only
+# test cannot tell "off the curve" from "this did not run".
+key_kind() {
+  local value="$1" label="$2" answer=""
+  answer=$(python3 scripts/on_curve.py "$value" 2>/dev/null) || answer=""
+  case "$answer" in
+    wallet|program) echo "$answer" ;;
+    *) echo "error: could not classify $label '$value' — on_curve.py gave no verdict" >&2; return 1 ;;
+  esac
+}
+
 env_upgrade_authority() {
   local f; f=$(env_file "$1") || return 1
   local ua

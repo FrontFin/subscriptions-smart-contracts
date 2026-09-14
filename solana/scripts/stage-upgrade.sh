@@ -32,7 +32,8 @@ fi
 # A wallet key there means the migration never happened, so the operator would
 # be told to approve in Squads for an authority that still signs on its own.
 require_pubkey "$VAULT" "UPGRADE_AUTHORITY" || exit 1
-if python3 scripts/on_curve.py "$VAULT"; then
+VAULT_KIND=$(key_kind "$VAULT" "UPGRADE_AUTHORITY") || exit 1
+if [[ "$VAULT_KIND" != "program" ]]; then
   echo "error: the upgrade authority $VAULT is an ordinary wallet, not a vault." >&2
   echo "       Use scripts/upgrade.sh $ENV for a wallet-held authority, or run" >&2
   echo "       scripts/migrate-to-squads.sh $ENV <vault> first. Nothing was staged." >&2

@@ -28,7 +28,8 @@ require_pubkey "$VAULT" "vault address" || exit 1
 # and one that no Squad controls would leave the program permanently
 # unupgradeable. Retyping the address in full and opening it in the Squads app
 # are the checks that catch that; they are not optional.
-if python3 scripts/on_curve.py "$VAULT"; then
+VAULT_KIND=$(key_kind "$VAULT" "vault address") || exit 1
+if [[ "$VAULT_KIND" != "program" ]]; then
   echo "error: $VAULT is an ordinary wallet address, not a Squads vault." >&2
   echo "A vault is a program address and has no private key. Copy the vault" >&2
   echo "address from Squads, not a member's wallet address. Nothing was sent." >&2

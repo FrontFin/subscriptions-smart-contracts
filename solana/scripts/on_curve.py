@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exit 0 if a pubkey has a private key, 1 if it is a program address.
+"""Classify a pubkey: prints "wallet" or "program" on stdout.
 
 Usage: on_curve.py <pubkey>
 
@@ -7,6 +7,12 @@ Every keypair's public key is a point on the ed25519 curve. A program address
 is chosen precisely because it is not, so nothing can sign for it. A Squads
 vault is a program address: it can neither pay a transaction fee nor sign in a
 browser wallet.
+
+The answer is the printed word, never the exit status. An uncaught exception
+also exits 1, so a caller reading the status alone cannot tell "off the curve"
+from "this script failed to run" — and every caller gates an irreversible
+operation on the answer. Nothing is printed unless the classification
+succeeded.
 """
 import sys
 
@@ -26,4 +32,4 @@ if len(key) != 32:
     print(f'error: {sys.argv[1]} is {len(key)} bytes, not 32', file=sys.stderr)
     sys.exit(2)
 
-sys.exit(0 if oncurve(key) else 1)
+print('wallet' if oncurve(key) else 'program')

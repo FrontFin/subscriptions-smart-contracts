@@ -52,7 +52,8 @@ fi
 
 # Both signers below sign in a browser wallet, so neither may be a program
 # address such as a Squads vault. Checked before anything is destroyed.
-if ! python3 scripts/on_curve.py "$AUTHORITY"; then
+AUTHORITY_KIND=$(key_kind "$AUTHORITY" "upgrade authority") || exit 1
+if [[ "$AUTHORITY_KIND" != "wallet" ]]; then
   echo "error: upgrade authority $AUTHORITY is a program address, not a wallet." >&2
   echo "It cannot pay a fee or sign in the browser, so this script cannot burn" >&2
   echo "the program id directly. Run 'scripts/close.sh $ENV --print' and execute" >&2
@@ -73,7 +74,8 @@ read -rp "Type 'close' to proceed: " CONFIRM
 CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null \
   | awk '$1=="admin"{print $3}')
 if [[ -n "$CONFIG_ADMIN" ]]; then
-  if ! python3 scripts/on_curve.py "$CONFIG_ADMIN"; then
+  CONFIG_ADMIN_KIND=$(key_kind "$CONFIG_ADMIN" "config admin") || exit 1
+  if [[ "$CONFIG_ADMIN_KIND" != "wallet" ]]; then
     echo "error: config admin $CONFIG_ADMIN is a program address, not a wallet" >&2
     echo "(a Squads vault, for example). It can neither pay the fee nor sign in" >&2
     echo "the browser, so the config rent cannot be reclaimed this way." >&2
