@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Print the MeshDelegate PDA for a program id: derive_pda.py <program-id>"""
+"""Print a PDA for a program id: derive_pda.py <program-id> [seed]
+The seed defaults to mesh_delegate; pass `config` for the Config account."""
 import hashlib
 import sys
 
@@ -39,8 +40,9 @@ def oncurve(b):
 
 
 prog = b58d(sys.argv[1])
+seed = sys.argv[2].encode() if len(sys.argv) > 2 else b'mesh_delegate'
 for bump in range(255, -1, -1):
-    h = hashlib.sha256(b'mesh_delegate' + bytes([bump]) + prog + b'ProgramDerivedAddress').digest()
+    h = hashlib.sha256(seed + bytes([bump]) + prog + b'ProgramDerivedAddress').digest()
     if not oncurve(h):
         print(b58e(h))
         break

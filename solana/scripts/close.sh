@@ -32,9 +32,30 @@ read -rp "Type 'close' to proceed: " CONFIRM
 # First reclaim the config account's rent, while the program is still live
 # (closing the program first would orphan it). Signed by the CURRENT on-chain
 # admin — which may differ from the upgrade authority after a handover.
-CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null \
-  | awk '$1=="admin"{print $3}')
-if [[ -n "$CONFIG_ADMIN" ]]; then
+CONFIG_PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID" config)
+CONFIG_PRESENT=$(curl -s "$RPC_URL" -X POST -H "Content-Type: application/json" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$CONFIG_PDA\",{\"encoding\":\"base64\"}]}" \
+  | python3 -c '
+import json, sys
+try:
+    body = json.load(sys.stdin)
+except Exception:
+    print("unreadable"); raise SystemExit
+if not isinstance(body, dict) or "error" in body or "result" not in body:
+    print("unreadable"); raise SystemExit
+print("absent" if body["result"].get("value") is None else "present")
+' 2>/dev/null) || CONFIG_PRESENT="unreadable"
+if [[ "$CONFIG_PRESENT" == "unreadable" ]]; then
+  echo "error: could not read the config account $CONFIG_PDA. Closing the program without knowing whether a live Config exists could orphan it forever, so stopping. The program is untouched." >&2
+  exit 1
+fi
+if [[ "$CONFIG_PRESENT" == "present" ]]; then
+  CONFIG_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" show 2>/dev/null \
+    | awk '$1=="admin"{print $3}')
+  [[ -n "$CONFIG_ADMIN" ]] || {
+    echo "error: the config account $CONFIG_PDA exists but its admin could not be read — the RPC may be failing, or the deployed layout may differ. Stopping; the program is untouched." >&2
+    exit 1
+  }
   CB64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$CONFIG_ADMIN" "$RPC_URL" close-config \
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
   # Simulate first: skip gracefully (no scary popup) only if the deployed
@@ -80,7 +101,7 @@ print("no-close-config" if code == 101 else "failed " + json.dumps(err))
     fi
   fi
 else
-  echo "no config found on-chain — skipping config-rent reclaim."
+  echo "no config account on-chain at $CONFIG_PDA — skipping config-rent reclaim."
 fi
 
 while true; do
@@ -101,7 +122,7 @@ while true; do
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || { echo "aborted"; exit 1; }
 done
 
-UNPINNED=$(mktemp)
+UNPINNED=$(mktemp "scripts/envs/.$ENV.env.XXXXXX")
 sed -e '/^PROGRAM_ID=/d' \
   -e '/^# \^ the smart contract address/d' \
   -e '/^#   SolanaSubscription.*SmartContractAddress/d' \
@@ -110,11 +131,10 @@ sed -e '/^PROGRAM_ID=/d' \
   -e '/^# becomes the .delegatee. recorded/d' \
   -e '/^# MeshDelegate PDA = /d' \
   "scripts/envs/$ENV.env" > "$UNPINNED" \
-  && cat "$UNPINNED" > "scripts/envs/$ENV.env" \
-  && rm -f "$UNPINNED" \
+  && mv "$UNPINNED" "scripts/envs/$ENV.env" \
   || {
     rm -f "$UNPINNED"
-    echo "error: the program IS closed, but PROGRAM_ID could not be unpinned from scripts/envs/$ENV.env — delete the PROGRAM_ID line by hand before the next deploy." >&2
+    echo "error: the program IS closed, but PROGRAM_ID could not be unpinned from scripts/envs/$ENV.env — the file is unchanged; delete the PROGRAM_ID line by hand before the next deploy." >&2
     exit 1
   }
 echo "Done. Rent refunded to $RECIPIENT."
