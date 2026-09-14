@@ -51,14 +51,30 @@ _eph_cleanup() {
       strays=$(list_buffers "$eph_pub" "$_EPH_URL") || { strays=""; listed=false; }
       [[ -z "$strays" ]] || echo "closing the write buffer this run left behind (rent → $_EPH_SWEEP_TO)..." >&2
       if ! solana program close --buffers -k "$EPHEMERAL" --authority "$EPHEMERAL" --recipient "$_EPH_SWEEP_TO" --url "$_EPH_URL" >/dev/null 2>&1; then
+        # A buffer that was not confirmed closed can only ever be closed by this
+        # key, so keep a copy rather than deleting the rent away — the same
+        # treatment the sweep failure below gets.
+        local buffer_key=""
+        if [[ -n "$strays" || "$listed" == false ]]; then
+          buffer_key=$(_eph_rescue_copy buffer-authority) || buffer_key=""
+          if [[ -z "$buffer_key" ]]; then
+            buffer_key="$EPHEMERAL"
+            _eph_keep_payer_keypair
+          fi
+        fi
         if [[ -n "$strays" ]]; then
-          echo "⚠️  could not close it — its authority key is deleted on exit, so this rent is lost:" >&2
+          echo "⚠️  could not close the write buffer this run left behind:" >&2
           echo "$strays" >&2
         elif [[ "$listed" == false ]]; then
           echo "⚠️  could not close the write buffer, and could not list what $eph_pub holds," >&2
-          echo "   so there may be one. Its authority key is deleted on exit, which makes that" >&2
-          echo "   rent unrecoverable. Check what was left behind with:" >&2
+          echo "   so there may be one. Check with:" >&2
           echo "     solana program show --buffers --buffer-authority $eph_pub --url $_EPH_URL" >&2
+        fi
+        if [[ -n "$buffer_key" ]]; then
+          echo "   Its authority key is kept at: $buffer_key" >&2
+          echo "   Reclaim the rent with:" >&2
+          echo "     solana program close --buffers -k $buffer_key --authority $buffer_key --recipient $_EPH_SWEEP_TO --url $_EPH_URL" >&2
+          echo "   DELETE that file once the rent is back." >&2
         fi
       fi
     fi

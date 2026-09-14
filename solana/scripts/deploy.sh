@@ -91,6 +91,14 @@ if ! solana program deploy "$ARTIFACT" \
   else
     echo "   Its write buffer (if any) belongs to the temporary payer and is closed on" >&2
     echo "   exit, so that rent comes back to $UPGRADE_AUTHORITY." >&2
+    # deploy can create the program before it reports failure, and until the
+    # handover runs the temporary payer is that program's upgrade authority —
+    # the only key that can ever close it.
+    if retain_ephemeral_payer; then
+      echo "   The temporary payer key is kept at: $RETAINED_PAYER_FILE" >&2
+      echo "   If $PROGRAM_ID reached the chain, that key is its upgrade authority and" >&2
+      echo "   the only way to reclaim its rent. DELETE the file once you are done." >&2
+    fi
   fi
   echo "   $ENV_FILE was NOT touched — re-running mints a fresh program id." >&2
   echo "   The program key is discarded on exit, so if $PROGRAM_ID was already created" >&2
@@ -167,11 +175,13 @@ while true; do
 done
 $INITIALIZED || echo "⚠️  Config NOT initialized — pulls will fail until you run: scripts/set-puller-keys.sh $ENV" >&2
 
+ADMIN_UNVERIFIED=false
 if $INITIALIZED; then
   # Allow read failures to reach the recovery warning instead of exiting under set -e.
   ON_CHAIN_ADMIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show \
     | awk '$1=="admin"{print $3}' || true)
   if [[ -z "$ON_CHAIN_ADMIN" ]]; then
+    ADMIN_UNVERIFIED=true
     echo "⚠️  could not read the config admin back — the read failed or returned" >&2
     echo "   nothing (RPC error, admin-cli build failure, or unexpected output)." >&2
     echo "   PROGRAM_ID is already pinned in $ENV_FILE; verify before wiring the backend:" >&2
@@ -193,3 +203,13 @@ echo "        and SolanaSubscriptionPullerConfig--SmartContractAddress (Backend 
 echo "  MeshDelegate PDA (informational)    : $PDA"
 echo "      → derived by the backend itself from the contract address; becomes the"
 echo "        'delegatee' recorded on each subscription (DB row + on-chain delegation)"
+
+# The address above is printed so nothing is lost, but the deploy is not proven
+# until the admin reads back. Exit non-zero so automation cannot treat an
+# unverified config as a finished deploy.
+if $ADMIN_UNVERIFIED; then
+  echo >&2
+  echo "🛑 exiting non-zero: the config admin was never verified (see the warning" >&2
+  echo "   above). Re-run the printed 'show' command before wiring the backend." >&2
+  exit 1
+fi

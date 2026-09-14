@@ -14,6 +14,6 @@ pub enum ControllerError {
     #[msg("Config cannot be closed while an admin handover is pending")]
     HandoverPending,
     // Append errors only: Anchor assigns wire codes by position, starting at 6000.
-    #[msg("Pull amount is below MIN_PULL_AMOUNT")]
+    #[msg("Pull amount is below the minimum of 10000 token base units")]
     AmountBelowMinimum,
 }
