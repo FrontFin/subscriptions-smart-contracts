@@ -11,6 +11,16 @@ ENV="${1:?usage: scripts/deploy.sh <local|dev|prod>}"
 ENV_FILE=$(env_file "$ENV")
 UPGRADE_AUTHORITY=$(env_upgrade_authority "$ENV")
 require_pubkey "$UPGRADE_AUTHORITY" "UPGRADE_AUTHORITY in $ENV_FILE" || exit 1
+# A first deploy needs this key to sign in the browser, both to fund the payer
+# and to initialize the config. A program address cannot, so with a FEE_PAYER
+# override the deploy would pin a program and then fail at initialization,
+# leaving a live program with no way to create its config.
+if ! python3 scripts/on_curve.py "$UPGRADE_AUTHORITY"; then
+  echo "error: UPGRADE_AUTHORITY in $ENV_FILE is $UPGRADE_AUTHORITY, a program" >&2
+  echo "address. It cannot sign, so this deploy would strand an initialized-less" >&2
+  echo "program. Deploy with a wallet, then hand over with migrate-to-squads.sh." >&2
+  exit 1
+fi
 URL="mainnet-beta"
 RPC_URL="https://api.mainnet-beta.solana.com"
 

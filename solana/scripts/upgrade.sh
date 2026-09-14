@@ -52,21 +52,29 @@ fi
 BUFFER=$(solana program write-buffer "$ARTIFACT" --keypair "$PAYER_FILE" --url "$URL" | awk '/Buffer:/ {print $2}')
 [[ -n "$BUFFER" ]] || { echo "error: buffer address not captured" >&2; exit 1; }
 echo "buffer staged: $BUFFER"
-solana program set-buffer-authority "$BUFFER" --new-buffer-authority "$AUTHORITY" --keypair "$PAYER_FILE" --url "$URL" >/dev/null
 
-BUFFER_LIVE=false
+# The buffer holds rent and is a second way to upgrade the program, so it is
+# tracked from the moment it exists. The handoff below is inside the tracked
+# window on purpose: it can land and still report failure, which leaves the
+# buffer under $AUTHORITY rather than the temporary payer.
+BUFFER_LIVE=true
 _upgrade_cleanup() {
   if $BUFFER_LIVE; then
     echo >&2
-    echo "The staged buffer $BUFFER still exists (authority: $AUTHORITY)." >&2
+    echo "The staged buffer $BUFFER still exists." >&2
     echo "Re-running this script stages a NEW buffer; close the old one with:" >&2
     echo "  scripts/buffers.sh $ENV --close $BUFFER" >&2
+    # The handoff may or may not have landed, so look under both owners.
     report_stray_buffers "$AUTHORITY" "$URL" "scripts/buffers.sh $ENV --close"
+    [[ -z "${EPHEMERAL_PUBKEY:-}" ]] ||
+      report_stray_buffers "$EPHEMERAL_PUBKEY" "$URL" "scripts/buffers.sh $ENV --close"
   fi
   _eph_cleanup
 }
 trap _upgrade_cleanup EXIT INT TERM
-BUFFER_LIVE=true
+
+EPHEMERAL_PUBKEY=$(solana-keygen pubkey "$PAYER_FILE" 2>/dev/null) || EPHEMERAL_PUBKEY=""
+solana program set-buffer-authority "$BUFFER" --new-buffer-authority "$AUTHORITY" --keypair "$PAYER_FILE" --url "$URL" >/dev/null
 
 while true; do
   B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" upgrade "$BUFFER" \

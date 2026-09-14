@@ -78,10 +78,14 @@ echo
 if solana account "$VAULT" --url "$URL" >/dev/null 2>&1; then
   echo "vault account     : exists on $URL"
 else
-  echo "⚠️  $VAULT does not exist on $URL yet."
-  echo "   A Squads vault is a System-owned PDA and only appears once something"
-  echo "   funds it, so this is normal for a fresh vault — but it is also what a"
-  echo "   typo looks like. Open the address in the Squads app before continuing."
+  echo "error: $VAULT does not exist on $URL." >&2
+  echo "   A Squads vault is a System-owned PDA that appears once something funds" >&2
+  echo "   it, so a fresh vault looks exactly like a typo — and a typo here makes" >&2
+  echo "   the program permanently unupgradeable." >&2
+  echo "   Send a small amount to the vault from the Squads app, then rerun. That" >&2
+  echo "   proves the address is the one the Squad actually controls." >&2
+  echo "   Nothing was sent." >&2
+  exit 1
 fi
 echo
 
