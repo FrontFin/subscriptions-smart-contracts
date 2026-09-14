@@ -54,11 +54,26 @@ BUFFER=$(solana program write-buffer "$ARTIFACT" --keypair "$PAYER_FILE" --url "
 echo "buffer staged: $BUFFER"
 solana program set-buffer-authority "$BUFFER" --new-buffer-authority "$AUTHORITY" --keypair "$PAYER_FILE" --url "$URL" >/dev/null
 
+BUFFER_LIVE=false
+_upgrade_cleanup() {
+  if $BUFFER_LIVE; then
+    echo >&2
+    echo "The staged buffer $BUFFER still exists (authority: $AUTHORITY)." >&2
+    echo "Re-running this script stages a NEW buffer; close the old one with:" >&2
+    echo "  scripts/buffers.sh $ENV --close $BUFFER" >&2
+    report_stray_buffers "$AUTHORITY" "$URL" "scripts/buffers.sh $ENV --close"
+  fi
+  _eph_cleanup
+}
+trap _upgrade_cleanup EXIT INT TERM
+BUFFER_LIVE=true
+
 while true; do
   B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$AUTHORITY" "$RPC_URL" upgrade "$BUFFER" \
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
   [[ -n "$B64" ]] || { echo "error: could not build the upgrade transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$AUTHORITY"); then
+    BUFFER_LIVE=false
     echo "upgrade signature: $SIG"
     solana confirm "$SIG" --url "$URL" || true
     solana program show "$PROGRAM_ID" --url "$URL"
@@ -71,8 +86,5 @@ while true; do
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || break
 done
 
-echo "Upgrade not executed. The staged buffer $BUFFER still exists (authority: $AUTHORITY)." >&2
-echo "Re-running this script stages a NEW buffer; close the old one with:" >&2
-echo "  scripts/buffers.sh $ENV --close $BUFFER" >&2
-report_stray_buffers "$AUTHORITY" "$URL" "scripts/buffers.sh $ENV --close"
+echo "Upgrade not executed." >&2
 exit 1

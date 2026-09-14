@@ -16,6 +16,21 @@ _eph_keep_payer_keypair() {
   SECRET_TMPFILES=(${kept[@]+"${kept[@]}"})
 }
 
+# Keep the temporary payer key past exit; sets RETAINED_PAYER_FILE.
+retain_ephemeral_payer() {
+  RETAINED_PAYER_FILE=""
+  [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" ]] || return 1
+  local pubkey rescue
+  pubkey=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || pubkey="unknown"
+  rescue="${TMPDIR:-/tmp}/mesh-retained-payer-$pubkey.json"
+  if cp "$EPHEMERAL" "$rescue" && chmod 600 "$rescue"; then
+    RETAINED_PAYER_FILE="$rescue"
+  else
+    RETAINED_PAYER_FILE="$EPHEMERAL"
+    _eph_keep_payer_keypair
+  fi
+}
+
 _eph_cleanup() {
   if [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" && -n "$_EPH_SWEEP_TO" ]]; then
     # Close buffers before deleting their authority key.
