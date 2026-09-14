@@ -203,9 +203,11 @@ def build_bridge(unsigned_tx_b64, expected_signer) -> Bridge:
                 self.send_response(413)
                 self.end_headers()
                 return
-            report = {}
             try:
-                report.update(json.loads(self.rfile.read(n) or b"{}"))
+                parsed = json.loads(self.rfile.read(n) or b"{}")
+                if not isinstance(parsed, dict):
+                    raise ValueError("the page must report a JSON object")
+                report = parsed
             except Exception:
                 report = {"error": "malformed response from the page"}
             reports.put(report)

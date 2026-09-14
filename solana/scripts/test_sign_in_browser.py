@@ -123,7 +123,8 @@ class SigningBridgeTests(unittest.TestCase):
         self.assert_nothing_reported()
 
     def test_body_that_is_not_a_json_object_is_reported_as_an_error(self):
-        for body in (b'{not json', b'[1, 2]', b'"text"', b'null', b'\xff\xfe'):
+        for body in (b'{not json', b'[1, 2]', b'"text"', b'null', b'\xff\xfe',
+                     b'[["signature", "forged"]]', b'[["error", "forged"]]'):
             with self.subTest(body=body):
                 response = self.post_report(self.authorized_headers(), body)
                 self.assertEqual(response.status, 200)
