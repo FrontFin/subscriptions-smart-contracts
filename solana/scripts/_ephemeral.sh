@@ -16,14 +16,24 @@ _eph_keep_payer_keypair() {
   SECRET_TMPFILES=(${kept[@]+"${kept[@]}"})
 }
 
+# Copy the payer key where it survives cleanup, and print the path. mktemp
+# creates the file itself, exclusively and readable only by this user, so a
+# symlink planted at a guessable name cannot redirect the private key.
+_eph_rescue_copy() {
+  local label="$1" pubkey rescue
+  pubkey=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || pubkey="unknown"
+  rescue=$(mktemp "${TMPDIR:-/tmp}/mesh-$label-payer-$pubkey-XXXXXX") || return 1
+  chmod 600 "$rescue" || { rm -f "$rescue"; return 1; }
+  cat "$EPHEMERAL" >"$rescue" || { rm -f "$rescue"; return 1; }
+  printf '%s' "$rescue"
+}
+
 # Keep the temporary payer key past exit; sets RETAINED_PAYER_FILE.
 retain_ephemeral_payer() {
   RETAINED_PAYER_FILE=""
   [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" ]] || return 1
-  local pubkey rescue
-  pubkey=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || pubkey="unknown"
-  rescue="${TMPDIR:-/tmp}/mesh-retained-payer-$pubkey.json"
-  if cp "$EPHEMERAL" "$rescue" && chmod 600 "$rescue"; then
+  local rescue
+  if rescue=$(_eph_rescue_copy retained); then
     RETAINED_PAYER_FILE="$rescue"
   else
     RETAINED_PAYER_FILE="$EPHEMERAL"
@@ -59,14 +69,8 @@ _eph_cleanup() {
     if [[ "$bal" != "0" ]]; then
       echo "sweeping ${bal:-an unknown amount of} SOL from the temporary payer back to $_EPH_SWEEP_TO..." >&2
       if ! solana transfer "$_EPH_SWEEP_TO" ALL --keypair "$EPHEMERAL" --url "$_EPH_URL" >/dev/null 2>&1; then
-        local pubkey="" rescue=""
-        pubkey=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || pubkey=""
-        if [[ -n "$pubkey" ]]; then
-          rescue="${TMPDIR:-/tmp}/mesh-unswept-payer-$pubkey.json"
-          if ! (cp "$EPHEMERAL" "$rescue" && chmod 600 "$rescue"); then
-            rescue=""
-          fi
-        fi
+        local rescue=""
+        rescue=$(_eph_rescue_copy unswept) || rescue=""
         if [[ -z "$rescue" ]]; then
           rescue="$EPHEMERAL"
           _eph_keep_payer_keypair
