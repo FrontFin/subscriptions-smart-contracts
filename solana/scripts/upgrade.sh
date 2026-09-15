@@ -99,7 +99,9 @@ _upgrade_cleanup() {
   fi
   _eph_cleanup
 }
-trap _upgrade_cleanup EXIT INT TERM
+# EXIT only — the INT/TERM handlers exit, which fires this. A signal trap that
+# returns would let an interrupted upgrade carry on past the operator's Ctrl-C.
+trap _upgrade_cleanup EXIT
 
 EPHEMERAL_PUBKEY=$(solana-keygen pubkey "$PAYER_FILE" 2>/dev/null) || EPHEMERAL_PUBKEY=""
 solana program set-buffer-authority "$BUFFER" --new-buffer-authority "$AUTHORITY" --keypair "$PAYER_FILE" --url "$URL" >/dev/null

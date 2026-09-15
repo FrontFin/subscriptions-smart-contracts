@@ -118,7 +118,8 @@ ephemeral_payer() {
   EPHEMERAL=$(mktemp)
   SECRET_TMPFILES+=("$EPHEMERAL")
   _EPH_SWEEP_TO="$authority"
-  trap _eph_cleanup EXIT INT TERM
+  # EXIT only — the INT/TERM handlers in _secrets.sh exit, which fires this.
+  trap _eph_cleanup EXIT
   solana-keygen new --no-bip39-passphrase --silent --force -o "$EPHEMERAL" >&2
   local eph_pub sol
   eph_pub=$(solana-keygen pubkey "$EPHEMERAL")

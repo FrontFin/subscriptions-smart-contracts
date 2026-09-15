@@ -91,7 +91,9 @@ _deploy_cleanup() {
   fi
   _eph_cleanup
 }
-trap _deploy_cleanup EXIT INT TERM
+# EXIT only — the INT/TERM handlers exit, which fires this. A signal trap that
+# returns would let an interrupted deploy carry on past the operator's Ctrl-C.
+trap _deploy_cleanup EXIT
 
 if ! solana program deploy "$ARTIFACT" \
   --program-id "$PROGRAM_KP" \
@@ -161,8 +163,14 @@ if [[ "$ON_CHAIN_UPGRADE_AUTHORITY" != "$UPGRADE_AUTHORITY" ]]; then
   echo "   $PROGRAM_ID is deployed and ${PAYER_PUBKEY:-the temporary payer} is still the only" >&2
   echo "   key that can upgrade or close it, so that key is kept at:" >&2
   echo "     $KEPT_KEY" >&2
-  echo "   Its balance is swept back to $UPGRADE_AUTHORITY on exit, so fund it again first:" >&2
-  [[ -z "$PAYER_PUBKEY" ]] || echo "     solana transfer $PAYER_PUBKEY 0.01 --url $URL" >&2
+  # Only the temporary payer is swept on exit; a FEE_PAYER override is left
+  # alone, and telling its operator to re-fund it would be wrong.
+  if [[ -z "${FEE_PAYER:-}" ]]; then
+    echo "   Its balance is swept back to $UPGRADE_AUTHORITY on exit, so fund it again first:" >&2
+    [[ -z "$PAYER_PUBKEY" ]] || echo "     solana transfer $PAYER_PUBKEY 0.01 --url $URL" >&2
+  else
+    echo "   It is your FEE_PAYER override, so its balance is left untouched." >&2
+  fi
   echo "   Then retry the handover:" >&2
   echo "     solana program set-upgrade-authority $PROGRAM_ID --keypair $KEPT_KEY \\" >&2
   echo "       --new-upgrade-authority $UPGRADE_AUTHORITY --skip-new-upgrade-authority-signer-check --url $URL" >&2

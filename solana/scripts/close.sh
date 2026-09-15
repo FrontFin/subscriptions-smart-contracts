@@ -21,6 +21,10 @@ case "${2:-}" in
   --*) echo "error: unknown option $2 (expected --print)" >&2; exit 1 ;;
   *) RECIPIENT="$2" ;;
 esac
+# admin-cli only parses the recipient when it builds the loader Close, which is
+# after close_config has already run. A malformed one would abort a teardown
+# that is half done.
+require_pubkey "$RECIPIENT" "refund recipient" || exit 1
 
 if [[ "$MODE" == "--print" ]]; then
   # print mode cannot build close_config without a config, and would abort the

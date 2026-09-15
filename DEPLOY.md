@@ -204,7 +204,7 @@ add members/threshold when prod needs it.
 **Testing.**
 
 ```bash
-./test.sh                       # 25 tests must pass (20 LiteSVM + 5 host-side layout guards)
+cd solana && ./test.sh          # 25 tests must pass (20 LiteSVM + 5 host-side layout guards)
 ```
 
 The suite creates the on-chain Config itself with keypairs derived from
