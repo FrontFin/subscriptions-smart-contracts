@@ -28,6 +28,8 @@ NEW_ADMIN="${3:?usage: scripts/change-admin.sh <env> propose|accept <new-admin-p
 [[ "$ENV" != "test" ]] || { echo "error: 'test' is the LiteSVM fixture — nothing on-chain" >&2; exit 1; }
 PROGRAM_ID=$(env_program_id "$ENV")
 RPC_URL="https://api.mainnet-beta.solana.com"
+# Pubkey::default() — proposing it cancels a pending handover.
+NO_PENDING_ADMIN="11111111111111111111111111111111"
 
 case "$STEP" in
   propose)
@@ -80,14 +82,25 @@ while true; do
       echo "Leave UPGRADE_AUTHORITY in scripts/envs/$ENV.env alone; it is the loader's"
       echo "authority, which this did not move."
     else
-      PENDING=$(awk '$1=="pending"&&$2=="admin"{print $4}' <<<"$STATE")
-      if [[ "$PENDING" != "$NEW_ADMIN" ]]; then
+      # Take everything after the colon rather than counting fields, so the
+      # check does not break when the CLI's column padding changes.
+      PENDING=$(sed -n 's/^ *pending admin *: *//p' <<<"$STATE")
+      if [[ "$NEW_ADMIN" == "$NO_PENDING_ADMIN" ]]; then
+        # Proposing the all-zero key cancels a handover, and admin-cli prints
+        # no pending line for it, so success here looks like absence.
+        if [[ -n "$PENDING" ]]; then
+          echo "error: $PENDING is still pending — the cancellation did not land." >&2
+          exit 1
+        fi
+        echo "Cancelled — no handover is pending, confirmed on chain."
+      elif [[ "$PENDING" != "$NEW_ADMIN" ]]; then
         echo "error: the config shows pending admin ${PENDING:-<none>}, not $NEW_ADMIN." >&2
         echo "The proposal did NOT land. Re-run this step." >&2
         exit 1
+      else
+        echo "Proposed — $NEW_ADMIN is pending, confirmed on chain. It must now run"
+        echo "'scripts/change-admin.sh $ENV accept $NEW_ADMIN' from its own wallet."
       fi
-      echo "Proposed — $NEW_ADMIN is pending, confirmed on chain. It must now run"
-      echo "'scripts/change-admin.sh $ENV accept $NEW_ADMIN' from its own wallet."
     fi
     exit 0
   fi

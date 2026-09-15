@@ -3,6 +3,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_secrets.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_buffers.sh"
 
 EPHEMERAL=""
+RETAINED_PAYER_FILE=""
 _EPH_SWEEP_TO=""
 _EPH_URL="mainnet-beta"
 
@@ -29,8 +30,11 @@ _eph_rescue_copy() {
 }
 
 # Keep the temporary payer key past exit; sets RETAINED_PAYER_FILE.
+# Idempotent: deploy.sh calls this from a failure branch and again from its EXIT
+# trap, and a second copy of a private key lying around is not a second safety
+# net — it is one more file nobody was told to delete.
 retain_ephemeral_payer() {
-  RETAINED_PAYER_FILE=""
+  [[ -z "${RETAINED_PAYER_FILE:-}" ]] || return 0
   [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" ]] || return 1
   local rescue
   if rescue=$(_eph_rescue_copy retained); then
