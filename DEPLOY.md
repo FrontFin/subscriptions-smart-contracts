@@ -11,6 +11,19 @@ Steps first, background last. The why is in the
 Prerequisites: Solana CLI (Agave) `4.0.2`, Rust `1.89`, a Wallet Standard
 browser wallet.
 
+The legacy key-paste flows also need Python 3.9+ and `cryptography` to derive
+Ed25519 public keys. From the repository root, create and activate an environment
+before running these scripts (the browser-only flows do not need this package):
+
+```bash
+python3 -m venv ~/.venvs/mesh-subscriptions
+source ~/.venvs/mesh-subscriptions/bin/activate
+python3 -m pip install -r solana/scripts/requirements.txt
+```
+
+Validate key staging without sending transactions:
+`python3 -m unittest discover -s solana/scripts -p 'test_stage_key.py'`.
+
 ## Deploy (first time for an env)
 
 1. **Configure** `scripts/envs/<env>.env` (`local`, `dev`, or `prod`):

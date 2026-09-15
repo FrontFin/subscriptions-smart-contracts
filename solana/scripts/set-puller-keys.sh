@@ -61,7 +61,10 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$SIGNER"); then
     echo "signature: $SIG"
-    solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1 || sleep 2
+    CONFIRM_RC=0; confirm_signature "$SIG" "$RPC_URL" || CONFIRM_RC=$?
+    if (( CONFIRM_RC != 0 )); then
+      echo "note: the puller-key change's outcome is not confirmed by this RPC — reading the config before deciding whether it took effect." >&2
+    fi
     ON_CHAIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show | tee /dev/stderr \
       | awk '$1=="puller"&&$2=="key"{print $4}' | normalize_keys)
     WANTED=$(printf '%s' "$KEYS" | normalize_keys)

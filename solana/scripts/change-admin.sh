@@ -55,15 +55,10 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$SIGNER"); then
     echo "signature: $SIG"
-    # The browser bridge returns as soon as it sends. Reporting a handover that
-    # never landed is the worst outcome here: the old admin stops using
-    # credentials that are in fact still the only ones that work.
-    # A failed confirm is not proof the transaction failed: the RPC can lose
-    # the confirmation after it lands. Saying "not changed" here could tell the
-    # operator to keep using a wallet that has already given up control, so the
-    # config below is what decides.
-    solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1 \
-      || echo "note: $SIG did not confirm through this RPC — reading the config to see what actually happened." >&2
+    CONFIRM_RC=0; confirm_signature "$SIG" "$RPC_URL" || CONFIRM_RC=$?
+    if (( CONFIRM_RC != 0 )); then
+      echo "note: the admin change's outcome is not confirmed by this RPC — reading the config before deciding whether it took effect." >&2
+    fi
     STATE=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show) || {
       echo "error: the config could not be read back, so the admin state is unknown." >&2
       echo "Check it before relying on either wallet:" >&2

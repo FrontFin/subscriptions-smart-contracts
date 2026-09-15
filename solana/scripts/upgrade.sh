@@ -112,29 +112,13 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the upgrade transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$AUTHORITY"); then
     echo "upgrade signature: $SIG"
-    # The wallet returns as soon as it sends. Only a confirmed, successful
-    # transaction proves the program was upgraded and the buffer consumed, so
-    # the buffer stays flagged live until then — otherwise a dropped upgrade
-    # leaves a second way to upgrade the program and nothing says so.
-    # A lost confirmation is not proof the upgrade failed, so the buffer
-    # decides: the loader consumes it when the upgrade lands.
-    if ! solana confirm "$SIG" --url "$URL"; then
-      echo >&2
-      echo "warning: $SIG did not confirm through this RPC." >&2
-      BUF_LOOKUP=$(solana account "$BUFFER" --url "$URL" 2>&1) && BUF_FOUND=true || BUF_FOUND=false
-      if $BUF_FOUND; then
-        echo "error: buffer $BUFFER still exists, so the upgrade did not land." >&2
-        break
-      fi
-      # A failed lookup is not proof of consumption — it also covers outages.
-      if ! grep -qiE 'accountnotfound|not found|unable to find|does not exist' <<<"$BUF_LOOKUP"; then
-        echo "error: could not tell whether buffer $BUFFER still exists, so the" >&2
-        echo "   upgrade outcome is unknown. Check it before re-running, because a" >&2
-        echo "   rerun stages another buffer:" >&2
-        echo "     solana confirm $SIG --url $URL" >&2
-        break
-      fi
-      echo "The buffer is gone, so the upgrade did land after all." >&2
+    CONFIRM_RC=0; confirm_signature "$SIG" "$URL" || CONFIRM_RC=$?
+    if (( CONFIRM_RC == 2 )); then
+      echo "error: the upgrade's outcome is UNKNOWN. Look up $SIG and check whether buffer $BUFFER still exists before staging another one." >&2
+      exit 1
+    elif (( CONFIRM_RC != 0 )); then
+      echo "error: the upgrade did not take effect. Buffer $BUFFER may still be staged. Re-running stages a NEW one; inspect or close the existing buffer first." >&2
+      exit 1
     fi
     BUFFER_LIVE=false
     solana program show "$PROGRAM_ID" --url "$URL"
