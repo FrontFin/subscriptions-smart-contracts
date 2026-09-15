@@ -5,7 +5,13 @@
 
 SECRET_TMPFILES=()
 _secrets_cleanup() { [[ ${#SECRET_TMPFILES[@]} -gt 0 ]] && rm -f "${SECRET_TMPFILES[@]}" || true; }
-trap _secrets_cleanup EXIT INT TERM
+# Cleanup hangs off EXIT only. A signal handler that returns instead of
+# exiting lets bash resume the script, so Ctrl-C would run cleanup and then
+# carry on with the operation the operator was trying to stop. Exiting from
+# the signal handler fires the EXIT trap, so cleanup still runs exactly once.
+trap _secrets_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # stage_secret_key <expected-pubkey> <label> <out-var> — assigns the temp
 # keypair path to <out-var>. Must be called directly (NOT in $(...) — a

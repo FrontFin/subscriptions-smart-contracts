@@ -1,46 +1,125 @@
-# Sourced helper — temporary fee payer funded FROM THE AUTHORITY WALLET, so
-# the wallet is the only funded wallet you maintain. Flow:
-#   1. mint a throwaway keypair (temp file, auto-removed on exit);
-#   2. one browser popup: the wallet funds it with the needed working capital;
-#   3. the throwaway does the mechanical signing (buffer writes etc.);
-#   4. on exit — success, error, or Ctrl-C — every leftover lamport is swept
-#      back to the wallet automatically.
-# Override: set FEE_PAYER=<keypair path> to use a standing hot key instead
-# (skips the funding popup and the sweep).
+# Browser-funded temporary payer; close buffers and sweep on exit. FEE_PAYER skips cleanup.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_secrets.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_buffers.sh"
 
 EPHEMERAL=""
+RETAINED_PAYER_FILE=""
 _EPH_SWEEP_TO=""
 _EPH_URL="mainnet-beta"
 
+# Retain the key if its balance could not be swept.
+_eph_keep_payer_keypair() {
+  local kept=()
+  local file
+  for file in ${SECRET_TMPFILES[@]+"${SECRET_TMPFILES[@]}"}; do
+    [[ "$file" == "$EPHEMERAL" ]] || kept+=("$file")
+  done
+  SECRET_TMPFILES=(${kept[@]+"${kept[@]}"})
+}
+
+# Copy the payer key where it survives cleanup, and print the path. mktemp
+# creates the file itself, exclusively and readable only by this user, so a
+# symlink planted at a guessable name cannot redirect the private key.
+_eph_rescue_copy() {
+  local label="$1" pubkey rescue
+  pubkey=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || pubkey="unknown"
+  rescue=$(mktemp "${TMPDIR:-/tmp}/mesh-$label-payer-$pubkey-XXXXXX") || return 1
+  chmod 600 "$rescue" || { rm -f "$rescue"; return 1; }
+  cat "$EPHEMERAL" >"$rescue" || { rm -f "$rescue"; return 1; }
+  printf '%s' "$rescue"
+}
+
+# Keep the temporary payer key past exit; sets RETAINED_PAYER_FILE.
+# Idempotent: deploy.sh calls this from a failure branch and again from its EXIT
+# trap, and a second copy of a private key lying around is not a second safety
+# net — it is one more file nobody was told to delete.
+retain_ephemeral_payer() {
+  [[ -z "${RETAINED_PAYER_FILE:-}" ]] || return 0
+  [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" ]] || return 1
+  local rescue
+  if rescue=$(_eph_rescue_copy retained); then
+    RETAINED_PAYER_FILE="$rescue"
+  else
+    RETAINED_PAYER_FILE="$EPHEMERAL"
+    _eph_keep_payer_keypair
+  fi
+}
+
 _eph_cleanup() {
   if [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" && -n "$_EPH_SWEEP_TO" ]]; then
-    local bal
-    bal=$(solana balance -k "$EPHEMERAL" -u "$_EPH_URL" 2>/dev/null | awk '{print $1}')
-    if [[ -n "$bal" && "$bal" != "0" ]]; then
-      echo "sweeping $bal SOL from the temporary payer back to $_EPH_SWEEP_TO..." >&2
-      solana transfer "$_EPH_SWEEP_TO" ALL --keypair "$EPHEMERAL" --url "$_EPH_URL" >/dev/null 2>&1 || true
+    # Close buffers before deleting their authority key.
+    local eph_pub strays
+    eph_pub=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || eph_pub=""
+    if [[ -n "$eph_pub" ]]; then
+      strays=$(list_buffers "$eph_pub" "$_EPH_URL") || strays=""
+      [[ -z "$strays" ]] || echo "closing the write buffer this run left behind (rent → $_EPH_SWEEP_TO)..." >&2
+      if ! solana program close --buffers -k "$EPHEMERAL" --authority "$EPHEMERAL" --recipient "$_EPH_SWEEP_TO" --url "$_EPH_URL" >/dev/null 2>&1; then
+        # A buffer that was not confirmed closed can only ever be closed by this
+        # key, so keep a copy rather than deleting the rent away — the same
+        # treatment the sweep failure below gets.
+        # An empty listing does not prove there is no buffer: the write, the
+        # list and the close can each see different RPC state. Every close that
+        # was not confirmed counts as unknown, so the key is always kept here.
+        local buffer_key=""
+        buffer_key=$(_eph_rescue_copy buffer-authority) || buffer_key=""
+        if [[ -z "$buffer_key" ]]; then
+          buffer_key="$EPHEMERAL"
+          _eph_keep_payer_keypair
+        fi
+        if [[ -n "$strays" ]]; then
+          echo "⚠️  could not close the write buffer this run left behind:" >&2
+          echo "$strays" >&2
+        else
+          echo "⚠️  could not close the write buffer, and cannot confirm whether" >&2
+          echo "   $eph_pub still holds one. Check with:" >&2
+          echo "     solana program show --buffers --buffer-authority $eph_pub --url $_EPH_URL" >&2
+        fi
+        if [[ -n "$buffer_key" ]]; then
+          echo "   Its authority key is kept at: $buffer_key" >&2
+          echo "   Reclaim the rent with:" >&2
+          echo "     solana program close --buffers -k $buffer_key --authority $buffer_key --recipient $_EPH_SWEEP_TO --url $_EPH_URL" >&2
+          echo "   DELETE that file once the rent is back." >&2
+        fi
+      fi
+    fi
+
+    # An RPC failure leaves the balance unknown; still attempt the sweep.
+    local bal=""
+    bal=$(solana balance -k "$EPHEMERAL" -u "$_EPH_URL" 2>/dev/null | awk '{print $1}') || bal=""
+    if [[ "$bal" != "0" ]]; then
+      echo "sweeping ${bal:-an unknown amount of} SOL from the temporary payer back to $_EPH_SWEEP_TO..." >&2
+      if ! solana transfer "$_EPH_SWEEP_TO" ALL --keypair "$EPHEMERAL" --url "$_EPH_URL" >/dev/null 2>&1; then
+        local rescue=""
+        rescue=$(_eph_rescue_copy unswept) || rescue=""
+        if [[ -z "$rescue" ]]; then
+          rescue="$EPHEMERAL"
+          _eph_keep_payer_keypair
+        fi
+        echo "⚠️  SWEEP FAILED — ${bal:-an unknown amount of} SOL is still on the temporary payer." >&2
+        echo "   Its key is kept at: $rescue" >&2
+        echo "   Recover with: solana transfer $_EPH_SWEEP_TO ALL --keypair $rescue --url $_EPH_URL" >&2
+        echo "   DELETE that file once the funds are back." >&2
+      fi
     fi
   fi
   _secrets_cleanup
 }
 
-# ephemeral_payer <authority-pubkey> <lamports> <rpc-http-url>
-# Sets PAYER_FILE. If FEE_PAYER is set in the environment, uses it directly
-# (no popup, no sweep); otherwise mints + browser-funds a throwaway.
+# ephemeral_payer <authority-pubkey> <lamports> <rpc-url>; sets PAYER_FILE.
 ephemeral_payer() {
   local authority="$1" lamports="$2" rpc="$3"
   if [[ -n "${FEE_PAYER:-}" ]]; then
     [[ -f "$FEE_PAYER" ]] || { echo "error: FEE_PAYER keypair $FEE_PAYER not found" >&2; return 1; }
     PAYER_FILE="$FEE_PAYER"
-    echo "fee payer: $(solana-keygen pubkey "$PAYER_FILE") (FEE_PAYER override — no funding popup, no sweep)" >&2
+    echo "fee payer: $(solana-keygen pubkey "$PAYER_FILE") (FEE_PAYER override — no funding popup, no buffer close, no sweep)" >&2
     return 0
   fi
 
   EPHEMERAL=$(mktemp)
   SECRET_TMPFILES+=("$EPHEMERAL")
   _EPH_SWEEP_TO="$authority"
-  trap _eph_cleanup EXIT INT TERM
+  # EXIT only — the INT/TERM handlers in _secrets.sh exit, which fires this.
+  trap _eph_cleanup EXIT
   solana-keygen new --no-bip39-passphrase --silent --force -o "$EPHEMERAL" >&2
   local eph_pub sol
   eph_pub=$(solana-keygen pubkey "$EPHEMERAL")

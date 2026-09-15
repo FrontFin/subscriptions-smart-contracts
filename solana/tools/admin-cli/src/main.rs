@@ -1,30 +1,9 @@
-//! Admin operations on the controller's on-chain Config — data transactions
-//! only, never builds or deploys code. Driven by the scripts in scripts/.
-//!
-//! Usage:
-//!   admin-cli <program-id> <signer> <rpc-url> keys    [puller-key ...]
-//!   admin-cli <program-id> <signer> <rpc-url> propose-admin <new-admin>
-//!   admin-cli <program-id> <signer> <rpc-url> accept-admin
-//!   admin-cli <program-id> <signer> <rpc-url> upgrade <buffer-address>
-//!   admin-cli <program-id> <signer> <rpc-url> show
-//!   admin-cli <program-id> <signer> <rpc-url> transfer <to> <lamports>
-//!   admin-cli <program-id> <signer> <rpc-url> close    <recipient>   (loader: undeploy program)
-//!   admin-cli <program-id> <signer> <rpc-url> close-config           (reclaim config rent)
-//!
-//! <signer> selects the mode:
-//!   a keypair file path — sign with it and send directly;
-//!   `tx:<PUBKEY>`       — build the transaction unsigned with <PUBKEY> as
-//!                         fee payer + authority and emit
-//!                         `UNSIGNED_TX_B64:<b64>` for the localhost browser
-//!                         bridge (scripts/sign_in_browser.py);
-//!   `print`             — for a Squads-held admin: read the current admin
-//!                         from the on-chain config and print the instruction
-//!                         for the Squads transaction builder.
-//!
-//! `keys` initializes the Config on first use, updates it afterwards; zero
-//! puller keys = the kill switch. `upgrade` builds the BPF-loader upgrade
-//! from a staged buffer (spill = the authority). `show` just prints the
-//! on-chain config.
+//! Admin CLI: <program-id> <signer> <rpc-url> <command> [args].
+//! Signer: keypair path sends directly; tx:<pubkey> emits UNSIGNED_TX_B64;
+//! print emits a Squads instruction using the on-chain admin; print:<pubkey>
+//! emits one for a signer the config does not name, such as the upgrade
+//! authority on the loader's Close.
+//! keys initializes missing config; an empty key list disables pulls.
 
 use anchor_lang::prelude::Pubkey;
 use anchor_lang::solana_program::instruction::Instruction;
@@ -87,7 +66,6 @@ fn num_bigint(bytes: &[u8]) -> Vec<u32> {
     // big-endian u32 limbs
     let mut n: Vec<u32> = Vec::new();
     for &b in bytes {
-        // n = n * 256 + b
         let mut carry = b as u64;
         for limb in n.iter_mut().rev() {
             let acc = (*limb as u64) << 8 | carry;
@@ -101,15 +79,31 @@ fn num_bigint(bytes: &[u8]) -> Vec<u32> {
     n
 }
 
+/// Only account absence returns None; treating RPC errors as absence would build Initialize.
 fn fetch_config(client: &RpcClient, config: &Pubkey) -> Option<subscription_controller::Config> {
-    let account = client.get_account(config).ok()?;
-    subscription_controller::Config::try_deserialize(&mut account.data.as_slice()).ok()
+    let account = match client.get_account_with_commitment(config, client.commitment()) {
+        Ok(response) => response.value?,
+        Err(err) => {
+            eprintln!("error: cannot read config {config} over RPC: {err}");
+            std::process::exit(1);
+        }
+    };
+    match subscription_controller::Config::try_deserialize(&mut account.data.as_slice()) {
+        Ok(state) => Some(state),
+        Err(err) => {
+            eprintln!("error: config {config} exists but does not deserialize: {err}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn print_config(client: &RpcClient, config: &Pubkey) {
     if let Some(state) = fetch_config(client, config) {
         println!("on-chain config now:");
         println!("  admin       : {}", state.admin);
+        if state.pending_admin != Pubkey::default() {
+            println!("  pending admin: {}", state.pending_admin);
+        }
         if state.puller_keys.is_empty() {
             println!("  puller keys : <EMPTY — KILL SWITCH: no key can pull>");
         } else {
@@ -128,14 +122,14 @@ fn main() {
         std::process::exit(2);
     }
     let program_id = Pubkey::from_str(&args[0]).expect("invalid program id");
-    let print_only = args[1] == "print";
+    let print_signer: Option<Pubkey> = args[1]
+        .strip_prefix("print:")
+        .map(|p| Pubkey::from_str(p).expect("invalid print:<pubkey> signer"));
+    let print_only = args[1] == "print" || print_signer.is_some();
     let tx_payer: Option<Pubkey> = args[1]
         .strip_prefix("tx:")
         .map(|p| Pubkey::from_str(p).expect("invalid tx:<pubkey> payer"));
-    // "confirmed", not the default "finalized": deploy.sh runs this right
-    // after `solana program deploy` (which confirms at "confirmed"), and a
-    // finalized-state preflight would simulate against the pre-upgrade
-    // binary for ~30s and fail with InstructionFallbackNotFound.
+    // Match deploy confirmation so preflight sees the new binary rather than stale finalized state.
     let client = RpcClient::new_with_commitment(
         args[2].clone(),
         solana_commitment_config::CommitmentConfig::confirmed(),
@@ -145,14 +139,13 @@ fn main() {
     let (config, _) =
         Pubkey::find_program_address(&[subscription_controller::CONFIG_SEED], &program_id);
 
-    // Who must sign as admin: in direct mode, the keypair; in print mode, the
-    // CURRENT on-chain admin (e.g. the Squads vault) — read from the config.
     let admin_pubkey: Pubkey;
-    let keypair = if print_only {
+    let keypair = if let Some(signer) = print_signer {
+        admin_pubkey = signer;
+        None
+    } else if print_only {
         let state = fetch_config(&client, &config)
             .expect("print mode needs an existing config (initialize directly first)");
-        // accept-admin is signed by the PENDING admin; everything else by the
-        // current admin.
         admin_pubkey = if command == "accept-admin" {
             state.pending_admin
         } else {
@@ -174,10 +167,8 @@ fn main() {
                 .iter()
                 .map(|k| Pubkey::from_str(k).expect("invalid puller key"))
                 .collect();
-            if !print_only && client.get_account(&config).is_err() {
+            if !print_only && fetch_config(&client, &config).is_none() {
                 println!("config {config} not found — initializing (admin = {admin_pubkey})");
-                // ProgramData PDA under the BPF upgradeable loader; the program
-                // enforces its upgrade authority == admin.
                 let (program_data, _) = Pubkey::find_program_address(
                     &[program_id.as_ref()],
                     &anchor_lang::solana_program::bpf_loader_upgradeable::ID,
@@ -206,7 +197,6 @@ fn main() {
             }
         }
         "propose-admin" => {
-            // Step 1 of the handover, signed by the CURRENT admin.
             let new_admin =
                 Pubkey::from_str(args.get(4).expect("usage: ... propose-admin <new-admin>"))
                     .expect("invalid new-admin pubkey");
@@ -222,7 +212,6 @@ fn main() {
             )
         }
         "accept-admin" => {
-            // Step 2, signed by the PENDING admin (the tx:/keypair signer).
             println!("accept_admin as {admin_pubkey}");
             Instruction::new_with_bytes(
                 program_id,
@@ -235,7 +224,6 @@ fn main() {
             )
         }
         "close-config" => {
-            // Reclaim the config account's rent → admin. Signed by the admin.
             println!("close_config (reclaim rent) — admin {admin_pubkey}");
             Instruction::new_with_bytes(
                 program_id,
@@ -252,10 +240,7 @@ fn main() {
             return;
         }
         "close" => {
-            // Loader v3 `Close` (variant 5) on the ProgramData account —
-            // undeploys the program, refunds its rent deposit to <recipient>,
-            // and burns the program id forever. Signed by the upgrade
-            // authority.
+            // Loader v3 Close (5) targets ProgramData, not the program account.
             let recipient = Pubkey::from_str(
                 args.get(4).expect("usage: ... close <recipient>"),
             )
@@ -276,8 +261,6 @@ fn main() {
             )
         }
         "transfer" => {
-            // System transfer FROM the signer — used by the scripts to fund a
-            // temporary fee payer from the authority wallet (browser popup).
             let to = Pubkey::from_str(
                 args.get(4).expect("usage: ... transfer <to> <lamports>"),
             )
@@ -309,8 +292,7 @@ fn main() {
             let (programdata, _) =
                 Pubkey::find_program_address(&[program_id.as_ref()], &loader);
             println!("upgrade {program_id} from buffer {buffer} (authority {admin_pubkey})");
-            // Loader v3 `Upgrade` (enum variant 3). Spill (buffer-rent refund)
-            // goes to the authority.
+            // Loader v3 Upgrade (3); refund buffer rent to the authority.
             Instruction::new_with_bytes(
                 loader,
                 &3u32.to_le_bytes(),

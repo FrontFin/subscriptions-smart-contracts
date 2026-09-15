@@ -1,7 +1,7 @@
 # Deploying the Mesh Subscription Controller
 
 Steps first, background last. The why is in the
-[TDD](../docs/solana-subscription-controller-tdd.md).
+[TDD](docs/solana-subscription-controller-tdd.md).
 
 > **Mainnet-only, money-moving.** Every signature is a popup in your browser
 > wallet (Phantom / Solflare / Backpack) via a localhost bridge — no private
@@ -57,8 +57,10 @@ Validate key staging without sending transactions:
    (`PROGRAM_ID` + the PDA as a comment). **Commit that file** — everything
    in it is public, and with no registry/DB yet the committed `.env` files
    are the source of truth for what each environment runs.
-5. **Verify** with a dust-amount subscription: subscribe → auto-pull through
-  the controller → check the transfer on an explorer.
+5. **Verify** with a smallest-allowed subscription: subscribe → auto-pull
+  through the controller → check the transfer on an explorer. The pull amount
+  must be at least `MIN_PULL_AMOUNT` (10,000 base units, $0.01 in six-decimal
+  USDC); anything smaller is rejected with `AmountBelowMinimum`.
 
 
 
@@ -92,8 +94,30 @@ wallet accepts). Two transactions signed by two different wallets:
   ```bash
    scripts/change-admin.sh <env> accept <new-admin-pubkey>
   ```
-   If you control both wallets, run both yourself. Then update
-   `UPGRADE_AUTHORITY` in `scripts/envs/<env>.env` to the new wallet.
+   If you control both wallets, run both yourself.
+
+> **Do not repoint `UPGRADE_AUTHORITY` after this.** `change-admin.sh` moves
+> only `Config.admin`. The loader's upgrade authority is a separate on-chain
+> value that only `solana program set-upgrade-authority` changes, and
+> `scripts/migrate-to-squads.sh` is the script that does it. The env file has
+> one `UPGRADE_AUTHORITY` line and the scripts read it as the **loader**
+> authority, so pointing it at the new config admin makes `upgrade.sh` and
+> `stage-upgrade.sh` sign with a wallet the loader rejects. The admin-signing
+> scripts read the live admin from chain and do not need the env file changed.
+
+### The upgrade authority outranks the config admin
+
+While a single wallet still holds the upgrade authority, an admin handover is
+**not** a boundary against that wallet. It can take the admin role back:
+
+- The upgrade authority can replace the program's code with anything.
+- `initialize` is gated on the upgrade authority and the `Config` PDA has a
+  fixed seed, so once the config account is closed the upgrade authority can
+  call `initialize` again and be admin.
+
+So treat "upgrade authority" and "config admin" as one role until
+`scripts/migrate-to-squads.sh` has moved **both** to a Squads multisig. Only
+then does the handover mean anything on its own.
 
 
 
@@ -115,6 +139,21 @@ Same program id, same PDA — delegations and backend config are unaffected.
 Never make the program immutable (`--final`) — upgrades are how code gets
 fixed. Binary growth is handled automatically.
 
+### Stray upgrade buffers
+
+An interrupted upgrade leaves its staged buffer on chain. The buffer holds
+rent, and while the upgrade authority owns it it is a second live way to
+upgrade the program — so check after any run that did not finish:
+
+```bash
+scripts/buffers.sh <env>            # list what the authority still holds
+scripts/buffers.sh <env> --close    # close them, rent back to the authority
+```
+
+`--close` needs the authority key, so it works only while the authority is a
+wallet you hold. Once it is a Squads vault, close the buffers from the Squads
+app instead.
+
 ## Undeploy
 
 ```bash
@@ -125,6 +164,23 @@ Refunds the rent deposit and unpins `PROGRAM_ID`. ⚠️ Irreversible: a closed
 program id is burned; the next deploy mints a fresh id → fresh PDA →
 existing delegations die and the backend `SmartContractAddress` must be
 updated.
+
+After `scripts/migrate-to-squads.sh`, the config admin and the upgrade
+authority are Squads vaults. A vault is a program address: it has no private
+key, so it can neither pay a transaction fee nor sign in a browser wallet.
+Teardown then runs from the Squads app:
+
+```bash
+scripts/close.sh <env> --print   # prints both instructions, in execution order
+```
+
+Execute them in the printed order — `close_config` first, then the loader
+`Close`. Closing the program first strands the config rent, because only that
+program can close its own config. Afterwards delete the `PROGRAM_ID` line and
+the comment block under it from `scripts/envs/<env>.env`.
+
+The browser-signed path checks both signers up front and stops before anything
+is destroyed if either one is a program address.
 
 ---
 
@@ -161,7 +217,7 @@ add members/threshold when prod needs it.
 **Testing.**
 
 ```bash
-./test.sh                       # 13 LiteSVM tests must pass
+cd solana && ./test.sh          # 25 tests must pass (20 LiteSVM + 5 host-side layout guards)
 ```
 
 The suite creates the on-chain Config itself with keypairs derived from

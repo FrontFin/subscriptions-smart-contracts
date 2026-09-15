@@ -26,7 +26,9 @@ if not program_id:
 
 lib = 'programs/subscription-controller/src/lib.rs'
 src = open(lib).read()
-new = re.sub(r'declare_id!\("[^"]*"\)', f'declare_id!("{program_id}")', src)
+new, count = re.subn(r'declare_id!\("[^"]*"\)', f'declare_id!("{program_id}")', src)
+if count != 1:
+    sys.exit(f'error: expected exactly one declare_id! in {lib}, rewrote {count} — nothing written')
 open(lib, 'w').write(new)
 
 print(f'applied {env_path}: program_id={program_id}')

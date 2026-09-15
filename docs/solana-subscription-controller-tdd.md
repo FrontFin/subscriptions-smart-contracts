@@ -13,10 +13,11 @@ A stateless **signer proxy** between the Mesh puller and Solana's native
 Subscriptions program (`De1egAF…`). It owns one PDA, **`MeshDelegate`**
 (`seeds=["mesh_delegate"]`), registered as the `delegatee` on every recurring
 delegation. A PDA has no private key, so only this program can sign as the
-delegatee — and only on the `pull` path, after a gate. It holds no funds and
-enforces no financial rules; the native program still enforces the per-period
-cap, rollover, expiry, and delegatee-must-sign. The controller decides *who*
-may pull and *that it is a pull*.
+delegatee — and only on the `pull` path, after a gate. It holds no funds, and
+its only financial rule is the minimum pull amount in decision 7; the native
+program still enforces the per-period cap, rollover, expiry, and
+delegatee-must-sign. The controller decides *who* may pull and *that it is a
+pull*.
 
 ```
 puller (hot key) → controller.pull → invoke_signed(MeshDelegate) → native pull_payment → user USDC → merchant USDC
@@ -30,7 +31,7 @@ puller (hot key) → controller.pull → invoke_signed(MeshDelegate) → native 
 - `set_puller_keys(keys)` — admin; replace the allow-list (empty = kill switch).
 - `propose_admin(new)` / `accept_admin()` — two-step admin handover.
 - `close_config()` — admin; reclaim config rent (teardown).
-- `pull(native_data)` — puller; gate then forward the native `pull_payment` as `MeshDelegate`.
+- `pull(native_data)` — puller; gate then forward the native `pull_payment` as `MeshDelegate`. Rejects `amount < MIN_PULL_AMOUNT` with `AmountBelowMinimum`.
 
 ## Key decisions (this iteration)
 
@@ -67,7 +68,16 @@ puller (hot key) → controller.pull → invoke_signed(MeshDelegate) → native 
    program id alone, so it is stable across upgrades and key rotations; a seed
    change would strand every existing delegation.
 
-7. **Accepted tradeoff (H1):** within `pull_payment` the destination and amount
+7. **`pull` enforces a minimum amount** (`MIN_PULL_AMOUNT = 10_000` base units,
+   `AmountBelowMinimum`, error 6005). *Why:* a fee-abuse control — each pull
+   costs the puller a transaction fee, so unbounded tiny pulls let a compromised
+   puller key drain fees without moving meaningful value. **This is a breaking
+   API change:** any caller sending less than 10,000 base units now fails where
+   it previously succeeded. The floor is chosen for six-decimal USDC, where
+   10,000 base units is $0.01. **The mint is not pinned by the program**, so the
+   floor must be reassessed before supporting a mint with different decimals.
+
+8. **Accepted tradeoff (H1):** within `pull_payment` the destination and amount
    are caller-chosen, so a compromised puller key can pull up to the per-period
    cap to any address. Bounded by kill switch + rotation, **not** by this
    program. A destination allow-list was deliberately left out to keep the
@@ -106,9 +116,10 @@ instead of the native pull.
 
 ## Testing & assurance
 
-15 LiteSVM tests: gate (unlisted/wrong-target/non-pull_payment rejected, every
-listed key passes), config lifecycle (init-once, upgrade-authority gate, admin
-gating, two-step handover, kill switch, close), and an end-to-end
-subscribe + pull against the mainnet-dumped native binary. Embedded
-`security.txt`. **External audit + dust-amount mainnet validation required
-before real traffic.**
+25 tests. 20 run in LiteSVM: gate (unlisted/wrong-target/non-pull_payment/
+below-minimum rejected, every listed key passes), config lifecycle (init-once,
+upgrade-authority gate, admin gating, two-step handover, kill switch, close),
+and an end-to-end subscribe + pull against the mainnet-dumped native binary.
+The other 5 are host-side byte-layout guards over the frozen `Config`, with no
+SVM and no SBF toolchain. Embedded `security.txt`. **External audit +
+smallest-allowed-amount mainnet validation required before real traffic.**

@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-# Apply the env's PULLER_KEYS to the program's ON-CHAIN config — a single
-# data transaction signed by the CONFIG ADMIN. The admin is read live from the
-# on-chain config (not assumed to be UPGRADE_AUTHORITY — after a handover they
-# can differ), so this always prompts for whoever actually controls the
-# config. No build, no deploy: the audited program code is untouched. If the
-# config doesn't exist yet, it initializes as the upgrade authority.
-#
-# Signing (2nd arg):
-#   (default)  browser wallet popup via the localhost bridge — the key never
-#              leaves the wallet extension;
-#   --paste    legacy: paste the base58 secret key at a hidden prompt;
-#   --print    Squads: print the instruction for the transaction builder.
-#
-# Rotation:    list old+new keys in the .env → run this → flip the backend's
-#              Key Vault secret → remove the old key → run this again.
-# Kill switch: set PULLER_KEYS="" → run this. Resume: restore keys → run.
-#
+# Update puller keys as the on-chain config admin; use upgrade authority for first initialization.
 # Usage: scripts/set-puller-keys.sh <local|dev|prod> [--paste|--print]
+# Default: browser signing. --paste: secret-key prompt. --print: Squads instruction.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/_wallet.sh
@@ -35,9 +20,9 @@ grep -q '^PULLER_KEYS=' "$ENV_FILE" || {
 }
 KEYS=$(grep '^PULLER_KEYS=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')
 
-# The signer must be the CURRENT config admin. Read it live from chain; if the
-# config isn't initialized yet, fall back to the upgrade authority (the
-# gated `initialize` path).
+# Normalize both key sets with bytewise sorting, independent of locale.
+normalize_keys() { tr -s ' \t\n' '\n' | sed '/^$/d' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//'; }
+
 SIGNER=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" show 2>/dev/null \
   | awk '$1=="admin"{print $3}')
 [[ -n "$SIGNER" ]] || SIGNER="$UPGRADE_AUTHORITY"
@@ -54,15 +39,12 @@ echo
 
 MODE="${2:-}"
 
-# Squads mode — the admin is the vault, so nothing is signed here; print the
-# instruction for the Squads transaction builder.
 if [[ "$MODE" == "--print" ]]; then
   # shellcheck disable=SC2086 — KEYS is intentionally word-split
   cargo run -q -p admin-cli -- "$PROGRAM_ID" print "$RPC_URL" keys $KEYS
   exit 0
 fi
 
-# Legacy paste mode.
 if [[ "$MODE" == "--paste" ]]; then
   prompt_wallet "$SIGNER"
   read -rp "Apply to the on-chain config on MAINNET? Type 'apply' to proceed: " CONFIRM
@@ -72,8 +54,6 @@ if [[ "$MODE" == "--paste" ]]; then
   exit 0
 fi
 
-# Default: browser wallet popup (localhost bridge). The wallet shows the
-# transaction and IS the confirmation step.
 while true; do
   # shellcheck disable=SC2086 — KEYS is intentionally word-split
   B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" keys $KEYS \
@@ -82,14 +62,20 @@ while true; do
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$SIGNER"); then
     echo "signature: $SIG"
     CONFIRM_RC=0; confirm_signature "$SIG" "$RPC_URL" || CONFIRM_RC=$?
-    if (( CONFIRM_RC == 2 )); then
-      echo "error: the puller-key change's outcome is UNKNOWN — look up $SIG before re-running, or you may apply it twice." >&2
-      exit 1
-    elif (( CONFIRM_RC != 0 )); then
-      echo "error: the puller-key change did not take effect — the on-chain config is unchanged." >&2
+    if (( CONFIRM_RC != 0 )); then
+      echo "note: the puller-key change's outcome is not confirmed by this RPC — reading the config before deciding whether it took effect." >&2
+    fi
+    ON_CHAIN=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show | tee /dev/stderr \
+      | awk '$1=="puller"&&$2=="key"{print $4}' | normalize_keys)
+    WANTED=$(printf '%s' "$KEYS" | normalize_keys)
+    if [[ "$ON_CHAIN" != "$WANTED" ]]; then
+      echo "🛑 on-chain puller keys are [$ON_CHAIN], expected [$WANTED] — the change did NOT land." >&2
+      if [[ -z "$WANTED" ]]; then
+        echo "   THE KILL SWITCH IS NOT ENGAGED. Re-run this script." >&2
+      fi
       exit 1
     fi
-    cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show || true
+    echo "verified on-chain: puller keys = [${ON_CHAIN:-EMPTY — kill switch engaged}]"
     exit 0
   fi
   echo
