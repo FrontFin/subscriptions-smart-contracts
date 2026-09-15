@@ -125,6 +125,12 @@ if ! solana program deploy "$ARTIFACT" \
   exit 1
 fi
 
+# The program now exists on chain. Record its id before the handover, because
+# every check after this point can abort, and the throwaway program key is
+# discarded on exit — an unrecorded id is a live program nobody can find.
+echo "PROGRAM_ID=$PROGRAM_ID" >> "$ENV_FILE"
+echo "pinned PROGRAM_ID=$PROGRAM_ID into $ENV_FILE (the throwaway program key is discarded on exit)"
+
 # This CLI transfer does not collect a destination signature.
 HANDOVER_REPORTED_OK=true
 solana program set-upgrade-authority "$PROGRAM_ID" \
@@ -163,7 +169,8 @@ if [[ "$ON_CHAIN_UPGRADE_AUTHORITY" != "$UPGRADE_AUTHORITY" ]]; then
   echo "   Or take the rent back and start over with a fresh id:" >&2
   echo "     solana program close $PROGRAM_ID -k $KEPT_KEY --authority $KEPT_KEY --recipient $UPGRADE_AUTHORITY --url $URL" >&2
   echo "   DELETE that key file once one of those is done." >&2
-  echo "   $ENV_FILE was NOT touched — the deployed id is $PROGRAM_ID." >&2
+  echo "   PROGRAM_ID=$PROGRAM_ID is already pinned in $ENV_FILE so the deployed id" >&2
+  echo "   is not lost. Remove that line if you close the program instead." >&2
   exit 1
 fi
 
@@ -171,10 +178,8 @@ fi
 # to survive this run.
 AUTHORITY_MOVED=true
 
-# Record the deployed ID before another step can abort and delete the throwaway key.
 PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID")
 {
-  echo "PROGRAM_ID=$PROGRAM_ID"
   echo "# ^ the smart contract address. Set BOTH backend settings to it (same value):"
   echo "#   SolanaSubscriptionConfig--SmartContractAddress        (Core API app)"
   echo "#   SolanaSubscriptionPullerConfig--SmartContractAddress  (Backend Functions app)"
@@ -183,7 +188,6 @@ PDA=$(python3 scripts/derive_pda.py "$PROGRAM_ID")
   echo "# becomes the 'delegatee' recorded on each subscription (DB row + on-chain):"
   echo "# MeshDelegate PDA = $PDA"
 } >> "$ENV_FILE"
-echo "pinned PROGRAM_ID=$PROGRAM_ID into $ENV_FILE (the throwaway program key is discarded on exit)"
 
 INITIALIZED=false
 while true; do

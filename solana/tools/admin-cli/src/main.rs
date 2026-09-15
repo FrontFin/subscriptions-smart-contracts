@@ -101,6 +101,9 @@ fn print_config(client: &RpcClient, config: &Pubkey) {
     if let Some(state) = fetch_config(client, config) {
         println!("on-chain config now:");
         println!("  admin       : {}", state.admin);
+        if state.pending_admin != Pubkey::default() {
+            println!("  pending admin: {}", state.pending_admin);
+        }
         if state.puller_keys.is_empty() {
             println!("  puller keys : <EMPTY — KILL SWITCH: no key can pull>");
         } else {

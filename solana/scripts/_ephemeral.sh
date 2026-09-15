@@ -44,30 +44,30 @@ retain_ephemeral_payer() {
 _eph_cleanup() {
   if [[ -n "$EPHEMERAL" && -f "$EPHEMERAL" && -n "$_EPH_SWEEP_TO" ]]; then
     # Close buffers before deleting their authority key.
-    local eph_pub strays listed
+    local eph_pub strays
     eph_pub=$(solana-keygen pubkey "$EPHEMERAL" 2>/dev/null) || eph_pub=""
     if [[ -n "$eph_pub" ]]; then
-      listed=true
-      strays=$(list_buffers "$eph_pub" "$_EPH_URL") || { strays=""; listed=false; }
+      strays=$(list_buffers "$eph_pub" "$_EPH_URL") || strays=""
       [[ -z "$strays" ]] || echo "closing the write buffer this run left behind (rent → $_EPH_SWEEP_TO)..." >&2
       if ! solana program close --buffers -k "$EPHEMERAL" --authority "$EPHEMERAL" --recipient "$_EPH_SWEEP_TO" --url "$_EPH_URL" >/dev/null 2>&1; then
         # A buffer that was not confirmed closed can only ever be closed by this
         # key, so keep a copy rather than deleting the rent away — the same
         # treatment the sweep failure below gets.
+        # An empty listing does not prove there is no buffer: the write, the
+        # list and the close can each see different RPC state. Every close that
+        # was not confirmed counts as unknown, so the key is always kept here.
         local buffer_key=""
-        if [[ -n "$strays" || "$listed" == false ]]; then
-          buffer_key=$(_eph_rescue_copy buffer-authority) || buffer_key=""
-          if [[ -z "$buffer_key" ]]; then
-            buffer_key="$EPHEMERAL"
-            _eph_keep_payer_keypair
-          fi
+        buffer_key=$(_eph_rescue_copy buffer-authority) || buffer_key=""
+        if [[ -z "$buffer_key" ]]; then
+          buffer_key="$EPHEMERAL"
+          _eph_keep_payer_keypair
         fi
         if [[ -n "$strays" ]]; then
           echo "⚠️  could not close the write buffer this run left behind:" >&2
           echo "$strays" >&2
-        elif [[ "$listed" == false ]]; then
-          echo "⚠️  could not close the write buffer, and could not list what $eph_pub holds," >&2
-          echo "   so there may be one. Check with:" >&2
+        else
+          echo "⚠️  could not close the write buffer, and cannot confirm whether" >&2
+          echo "   $eph_pub still holds one. Check with:" >&2
           echo "     solana program show --buffers --buffer-authority $eph_pub --url $_EPH_URL" >&2
         fi
         if [[ -n "$buffer_key" ]]; then

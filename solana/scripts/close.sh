@@ -31,6 +31,17 @@ if [[ "$MODE" == "--print" ]]; then
     echo "$SHOW_OUT" >&2
     exit 1
   }
+  # A close_config that is guaranteed to fail must not be printed above an
+  # irreversible loader Close: an operator who runs step 2 after step 1 failed
+  # burns the program and strands the config rent for good.
+  if grep -q '^ *pending admin' <<<"$SHOW_OUT"; then
+    echo "error: an admin handover is pending on $PROGRAM_ID." >&2
+    grep '^ *pending admin' <<<"$SHOW_OUT" >&2
+    echo "close_config is blocked while it is, so the first teardown instruction" >&2
+    echo "would fail and the second would burn the program with the config still" >&2
+    echo "on chain. Complete or cancel the handover, then rerun. Nothing printed." >&2
+    exit 1
+  fi
   if awk '$1=="admin"{found=1} END{exit !found}' <<<"$SHOW_OUT"; then
     echo "=== 1/2 close_config — reclaims the config rent ==="
     cargo run -q -p admin-cli -- "$PROGRAM_ID" print "$RPC_URL" close-config
@@ -186,7 +197,10 @@ fi
 # Rename a sibling temp file atomically, preserving the original mode and avoiding truncation.
 SCRUBBED=$(mktemp "scripts/envs/.$ENV.env.tmp.XXXXXX")
 trap 'rm -f "$SCRUBBED"' EXIT
-chmod --reference="scripts/envs/$ENV.env" "$SCRUBBED" 2>/dev/null || chmod 644 "$SCRUBBED"
+# chmod --reference is GNU-only, and hardcoding a fallback would widen a
+# private env file. Read the mode the way the rest of these scripts read sizes.
+ENV_MODE=$(stat -f%Lp "scripts/envs/$ENV.env" 2>/dev/null || stat -c%a "scripts/envs/$ENV.env")
+chmod "$ENV_MODE" "$SCRUBBED"
 sed \
   -e '/^PROGRAM_ID=/d' \
   -e '/^# \^ the smart contract address/d' \

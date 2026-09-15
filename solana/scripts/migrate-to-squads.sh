@@ -76,8 +76,17 @@ echo "   never be upgraded or closed again. Open the address in the Squads app"
 echo "   and confirm you can propose a transaction from it BEFORE continuing."
 echo
 
-if solana account "$VAULT" --url "$URL" >/dev/null 2>&1; then
+VAULT_LOOKUP=$(solana account "$VAULT" --url "$URL" 2>&1) && VAULT_FOUND=true || VAULT_FOUND=false
+if $VAULT_FOUND; then
   echo "vault account     : exists on $URL"
+elif ! grep -qiE "accountnotfound|not found|unable to find|does not exist" <<<"$VAULT_LOOKUP"; then
+  # An outage is not evidence about the address. Telling the operator to fund
+  # the vault here could send money somewhere on nothing but a timeout.
+  echo "error: could not check whether $VAULT exists on $URL." >&2
+  echo "   This says nothing about the address, so nothing was sent. Retry when" >&2
+  echo "   the RPC answers. It said:" >&2
+  echo "$VAULT_LOOKUP" >&2
+  exit 1
 else
   echo "error: $VAULT does not exist on $URL." >&2
   echo "   A Squads vault is a System-owned PDA that appears once something funds" >&2

@@ -1,5 +1,12 @@
 use anchor_lang::prelude::*;
 
+use crate::constants::MIN_PULL_AMOUNT;
+
+// Anchor's #[msg] takes a literal, so the threshold below is written out. This
+// keeps the message and the constant from drifting apart: change one without
+// the other and the build stops here.
+const _: () = assert!(MIN_PULL_AMOUNT == 10_000);
+
 #[error_code]
 pub enum ControllerError {
     // An empty allowlist uses Unauthorized as the kill-switch error.
