@@ -6,8 +6,15 @@ import json
 import os
 import sys
 
-ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+except ImportError:
+    sys.exit(
+        'error: cryptography is required; activate your Python virtual environment '
+        'and run: python3 -m pip install -r solana/scripts/requirements.txt (from the repo root)'
+    )
 
+ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 
 def b58decode(s):
     n = 0
@@ -34,10 +41,27 @@ except ValueError:
 if len(raw) != 64:
     sys.exit(f'error: decoded to {len(raw)} bytes, expected a 64-byte ed25519 secret key')
 
-pubkey = b58encode(raw[32:])
+# Derive from the seed: the stored public half is untrusted.
+derived = Ed25519PrivateKey.from_private_bytes(raw[:32]).public_key().public_bytes_raw()
+pubkey = b58encode(derived)
+claimed = b58encode(raw[32:])
+if pubkey != claimed:
+    sys.exit(f'error: key derives {pubkey} but claims {claimed} — malformed, nothing kept')
+
 expected = os.environ['EXPECTED']
 if expected and pubkey != expected:
     sys.exit(f'error: key derives {pubkey}, expected {expected} — wrong key, nothing kept')
 
-with open(os.environ['OUT'], 'w') as f:
+out = os.environ['OUT']
+existed = os.path.exists(out)
+fd = os.open(out, os.O_WRONLY | os.O_CREAT, 0o600)
+try:
+    os.fchmod(fd, 0o600)
+except (AttributeError, OSError) as exc:
+    if existed:
+        os.close(fd)
+        sys.exit(f'error: {out} already exists and its permissions cannot be restricted '
+                 f'here ({exc}) — delete it first, or stage the key on a POSIX machine')
+os.ftruncate(fd, 0)
+with os.fdopen(fd, 'w') as f:
     json.dump(list(raw), f)

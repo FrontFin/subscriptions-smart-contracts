@@ -8,11 +8,84 @@ private key never leaves the wallet extension; upgrading later to a Ledger
 Usage: sign_in_browser.py <base64-unsigned-tx> <expected-signer-pubkey>
 Prints the base58 transaction signature on success; exits non-zero otherwise.
 """
+import base64
+import html
 import http.server
 import json
+import queue
+import secrets
 import sys
-import time
+import threading
 import webbrowser
+from typing import NamedTuple
+
+MAX_REPORT_BYTES = 64 * 1024
+DEADLINE_SECONDS = 180
+BASE58_DIGITS = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+BASE58_ALPHABET = set(BASE58_DIGITS)
+
+
+def js_literal(value):
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def base58_decoded_length(text):
+    value = 0
+    for character in text:
+        value = value * 58 + BASE58_DIGITS.index(character)
+    leading_zeros = len(text) - len(text.lstrip("1"))
+    return leading_zeros + (value.bit_length() + 7) // 8
+
+
+def looks_like_base58(text, decoded_length):
+    if not 1 <= len(text) <= decoded_length * 2:
+        return False
+    if not set(text) <= BASE58_ALPHABET:
+        return False
+    return base58_decoded_length(text) == decoded_length
+
+
+def looks_like_base58_pubkey(text):
+    return looks_like_base58(text, 32)
+
+
+def looks_like_base58_signature(text):
+    return looks_like_base58(text, 64)
+
+
+def looks_like_base64_transaction(text):
+    try:
+        return bool(base64.b64decode(text, validate=True))
+    except ValueError:
+        return False
+
+
+def matches_secret(candidate, expected):
+    return secrets.compare_digest(
+        candidate.encode("utf-8", "replace"), expected.encode("utf-8")
+    )
+
+
+def signature_from_report(report):
+    error = report.get("error")
+    signature = report.get("signature")
+    if "error" in report:
+        if signature is not None:
+            raise ValueError(
+                "the page reported a signature and an error together, so the "
+                f"result is not trustworthy: {str(error)[:200]}"
+            )
+        raise ValueError(f"wallet reported: {str(error)[:200]}")
+    if signature is None:
+        raise ValueError("timed out waiting for the wallet signature")
+    if isinstance(signature, str) and looks_like_base58_signature(signature):
+        return signature
+    raise ValueError("the page reported a signature that is not base58")
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Sign transaction</title>
@@ -23,12 +96,12 @@ code{background:rgba(127,127,127,.15);padding:0 .3em;border-radius:3px}
 #status{margin-top:1rem;white-space:pre-wrap}
 </style></head><body>
 <h2>Mesh Subscription Controller — sign transaction</h2>
-<p>Expected signer: <code>__EXPECTED__</code></p>
+<p>Expected signer: <code>__EXPECTED_HTML__</code></p>
 <div id="wallets"><em>Looking for wallets&hellip;</em></div>
 <div id="status"></div>
 <script>
-const TX_B64 = "__TX_B64__";
-const EXPECTED = "__EXPECTED__";
+const TX_B64 = __TX_B64__;
+const EXPECTED = __EXPECTED_JS__;
 const txBytes = Uint8Array.from(atob(TX_B64), c => c.charCodeAt(0));
 
 const A = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -43,7 +116,13 @@ function b58(bytes) {
 
 function status(msg) { document.getElementById('status').textContent = msg; }
 async function report(obj) {
-  try { await fetch('/done', { method: 'POST', body: JSON.stringify(obj) }); } catch (e) {}
+  try {
+    await fetch(__DONE_PATH__, {
+      method: 'POST',
+      headers: { 'X-Bridge-Token': __TOKEN__ },
+      body: JSON.stringify(obj),
+    });
+  } catch (e) {}
 }
 
 const seen = new Set();
@@ -103,19 +182,45 @@ setTimeout(() => {
 """
 
 
-def main() -> None:
-    if len(sys.argv) != 3:
-        sys.exit("usage: sign_in_browser.py <base64-unsigned-tx> <expected-signer-pubkey>")
-    page = PAGE.replace("__TX_B64__", sys.argv[1]).replace("__EXPECTED__", sys.argv[2])
-    result = {}
+class Bridge(NamedTuple):
+    server: http.server.ThreadingHTTPServer
+    url: str
+    token: str
+    done_path: str
+    reports: queue.Queue
+
+
+def build_bridge(unsigned_tx_b64, expected_signer) -> Bridge:
+    # The secret path protects the transaction; the custom header forces a CORS preflight.
+    if not looks_like_base64_transaction(unsigned_tx_b64):
+        raise ValueError("unsigned transaction is not valid base64")
+    if not looks_like_base58_pubkey(expected_signer):
+        raise ValueError(f"expected-signer-pubkey is not base58: {expected_signer!r}")
+    token = secrets.token_urlsafe(24)
+    token_path = f"/{token}"
+    done_path = f"{token_path}/done"
+    allowed_origins = set()
+    page = (
+        PAGE.replace("__TX_B64__", js_literal(unsigned_tx_b64))
+        .replace("__EXPECTED_HTML__", html.escape(expected_signer))
+        .replace("__EXPECTED_JS__", js_literal(expected_signer))
+        .replace("__DONE_PATH__", js_literal(done_path))
+        .replace("__TOKEN__", js_literal(token))
+    )
+    reports = queue.Queue()
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        # Per-read timeout; incoming bytes reset it.
+        timeout = 10
+
         def do_GET(self):
-            if self.path == "/":
+            if matches_secret(self.path, token_path):
                 body = page.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 self.wfile.write(body)
             else:
@@ -123,33 +228,74 @@ def main() -> None:
                 self.end_headers()
 
         def do_POST(self):
-            n = int(self.headers.get("Content-Length", 0))
+            authorized = (
+                matches_secret(self.path, done_path)
+                and matches_secret(self.headers.get("X-Bridge-Token", ""), token)
+                and self.headers.get("Origin") in allowed_origins
+            )
+            if not authorized:
+                self.send_response(404)
+                self.end_headers()
+                return
             try:
-                result.update(json.loads(self.rfile.read(n) or b"{}"))
+                n = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                n = -1
+            if not 0 <= n <= MAX_REPORT_BYTES:
+                self.send_response(413)
+                self.end_headers()
+                return
+            try:
+                parsed = json.loads(self.rfile.read(n) or b"{}")
+                if not isinstance(parsed, dict):
+                    raise ValueError("the page must report a JSON object")
+                report = parsed
             except Exception:
-                result.update({"error": "malformed response from the page"})
+                report = {"error": "malformed response from the page"}
+            reports.put(report)
             self.send_response(200)
             self.end_headers()
 
         def log_message(self, *args):
             pass
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    url = f"http://127.0.0.1:{server.server_address[1]}/"
-    print(f"sign in your browser: {url}  (waiting up to 180s)", file=sys.stderr)
-    webbrowser.open(url)
-    server.timeout = 1
-    deadline = time.time() + 180
-    while time.time() < deadline and not result:
-        server.handle_request()
-    server.server_close()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    allowed_origins.update({f"http://127.0.0.1:{port}", f"http://localhost:{port}"})
+    return Bridge(
+        server=server,
+        url=f"http://127.0.0.1:{port}{token_path}",
+        token=token,
+        done_path=done_path,
+        reports=reports,
+    )
 
-    if result.get("signature"):
-        print(result["signature"])
-    elif result.get("error"):
-        sys.exit(f"error: wallet reported: {result['error']}")
-    else:
-        sys.exit("error: timed out waiting for the wallet signature")
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        sys.exit("usage: sign_in_browser.py <base64-unsigned-tx> <expected-signer-pubkey>")
+    unsigned_tx_b64, expected_signer = sys.argv[1], sys.argv[2]
+    try:
+        bridge = build_bridge(unsigned_tx_b64, expected_signer)
+    except ValueError as exc:
+        sys.exit(f"error: {exc}")
+    print(
+        f"sign in your browser: {bridge.url}  (waiting up to {DEADLINE_SECONDS}s)",
+        file=sys.stderr,
+    )
+    threading.Thread(target=bridge.server.serve_forever, daemon=True).start()
+    webbrowser.open(bridge.url)
+    try:
+        result = bridge.reports.get(timeout=DEADLINE_SECONDS)
+    except queue.Empty:
+        result = {}
+    bridge.server.shutdown()
+    bridge.server.server_close()
+
+    try:
+        print(signature_from_report(result))
+    except ValueError as exc:
+        sys.exit(f"error: {exc}")
 
 
 if __name__ == "__main__":

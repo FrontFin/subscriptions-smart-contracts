@@ -102,15 +102,23 @@ solana program set-upgrade-authority "$PROGRAM_ID" \
 
 # Popup 2 — the wallet initializes the on-chain Config (becomes admin).
 INITIALIZED=false
+INIT_UNKNOWN=""
 while true; do
   # shellcheck disable=SC2086 — KEYS is intentionally word-split
   B64=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$UPGRADE_AUTHORITY" "$RPC_URL" keys $KEYS \
         | awk -F': *|:' '/^UNSIGNED_TX_B64:/ {print $2}')
   [[ -n "$B64" ]] || { echo "error: could not build the initialize transaction" >&2; break; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$UPGRADE_AUTHORITY"); then
-    echo "config initialized: $SIG"
-    INITIALIZED=true
-    break
+    echo "initialize signature: $SIG"
+    CONFIRM_RC=0; confirm_signature "$SIG" "$URL" || CONFIRM_RC=$?
+    if (( CONFIRM_RC == 0 )); then
+      INITIALIZED=true
+      break
+    fi
+    if (( CONFIRM_RC == 2 )); then
+      INIT_UNKNOWN=$SIG
+      break
+    fi
   fi
   read -rp "Config not initialized (rejected or blockhash expired). Retry? [y/N] " AGAIN
   [[ "$AGAIN" == "y" || "$AGAIN" == "Y" ]] || break
@@ -152,3 +160,17 @@ echo "        and SolanaSubscriptionPullerConfig--SmartContractAddress (Backend 
 echo "  MeshDelegate PDA (informational)    : $PDA"
 echo "      → derived by the backend itself from the contract address; becomes the"
 echo "        'delegatee' recorded on each subscription (DB row + on-chain delegation)"
+
+if ! $INITIALIZED; then
+  echo >&2
+  echo "🛑 PARTIAL DEPLOY: the program is live at $PROGRAM_ID and pinned in $ENV_FILE." >&2
+  if [[ -n "$INIT_UNKNOWN" ]]; then
+    echo "   The initialize transaction's outcome is UNKNOWN — the RPC never answered." >&2
+    echo "   Look up $INIT_UNKNOWN first. Running set-puller-keys.sh before you know" >&2
+    echo "   whether it landed can initialize the config a second time." >&2
+  else
+    echo "   Its Config was never initialized, so every pull will fail." >&2
+    echo "   Finish it with: scripts/set-puller-keys.sh $ENV" >&2
+  fi
+  exit 1
+fi

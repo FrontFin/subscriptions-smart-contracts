@@ -71,7 +71,14 @@ while true; do
   [[ -n "$B64" ]] || { echo "error: could not build the upgrade transaction" >&2; exit 1; }
   if SIG=$(python3 scripts/sign_in_browser.py "$B64" "$AUTHORITY"); then
     echo "upgrade signature: $SIG"
-    solana confirm "$SIG" --url "$URL" || true
+    CONFIRM_RC=0; confirm_signature "$SIG" "$URL" || CONFIRM_RC=$?
+    if (( CONFIRM_RC == 2 )); then
+      echo "error: the upgrade's outcome is UNKNOWN. Look up $SIG and check whether buffer $BUFFER still exists before staging another one." >&2
+      exit 1
+    elif (( CONFIRM_RC != 0 )); then
+      echo "error: the upgrade did not take effect. Buffer $BUFFER was not consumed and is still staged, so re-running this script can reuse it rather than paying for a new one." >&2
+      exit 1
+    fi
     solana program show "$PROGRAM_ID" --url "$URL"
     echo "buffer rent was refunded to $AUTHORITY (the spill account)."
     exit 0
