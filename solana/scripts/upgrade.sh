@@ -114,10 +114,16 @@ while true; do
     # transaction proves the program was upgraded and the buffer consumed, so
     # the buffer stays flagged live until then — otherwise a dropped upgrade
     # leaves a second way to upgrade the program and nothing says so.
+    # A lost confirmation is not proof the upgrade failed, so the buffer
+    # decides: the loader consumes it when the upgrade lands.
     if ! solana confirm "$SIG" --url "$URL"; then
       echo >&2
-      echo "error: upgrade $SIG did not confirm — the program was NOT upgraded." >&2
-      break
+      echo "warning: $SIG did not confirm through this RPC." >&2
+      if solana account "$BUFFER" --url "$URL" >/dev/null 2>&1; then
+        echo "error: buffer $BUFFER still exists, so the upgrade did not land." >&2
+        break
+      fi
+      echo "The buffer is gone, which means the upgrade did land after all." >&2
     fi
     BUFFER_LIVE=false
     solana program show "$PROGRAM_ID" --url "$URL"

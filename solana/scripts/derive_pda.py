@@ -28,14 +28,26 @@ d = (-121665 * pow(121666, p - 2, p)) % p
 
 
 def oncurve(b):
-    y = int.from_bytes(b, 'little') & ((1 << 255) - 1)
+    """Decode a compressed ed25519 point the way Solana does.
+
+    The high bit of the last byte is the sign of x, not part of y. Ignoring it
+    accepts encodings the runtime rejects — notably x = 0 with the sign bit
+    set, which is a negative zero and has no valid decompression.
+    """
+    encoded = int.from_bytes(b, 'little')
+    sign = (encoded >> 255) & 1
+    y = encoded & ((1 << 255) - 1)
     if y >= p:
         return False
-    x2 = ((y * y - 1) % p) * pow((d * y * y + 1) % p, p - 2, p) % p
-    x = pow(x2, (p + 3) // 8, p)
-    if (x * x - x2) % p != 0:
-        x = (x * pow(2, (p - 1) // 4, p)) % p
-    return (x * x - x2) % p == 0
+    u = (y * y - 1) % p
+    v = (d * y * y + 1) % p
+    x = (u * pow(v, 3, p) % p) * pow(u * pow(v, 7, p) % p, (p - 5) // 8, p) % p
+    vxx = v * x % p * x % p
+    if vxx != u:
+        if vxx != (-u) % p:
+            return False
+        x = x * pow(2, (p - 1) // 4, p) % p
+    return not (x == 0 and sign == 1)
 
 
 def main():

@@ -56,13 +56,15 @@ while true; do
     # The browser bridge returns as soon as it sends. Reporting a handover that
     # never landed is the worst outcome here: the old admin stops using
     # credentials that are in fact still the only ones that work.
-    if ! solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1; then
-      echo "error: $SIG did not confirm — the admin was NOT changed." >&2
-      exit 1
-    fi
+    # A failed confirm is not proof the transaction failed: the RPC can lose
+    # the confirmation after it lands. Saying "not changed" here could tell the
+    # operator to keep using a wallet that has already given up control, so the
+    # config below is what decides.
+    solana confirm "$SIG" -u "$RPC_URL" >/dev/null 2>&1 \
+      || echo "note: $SIG did not confirm through this RPC — reading the config to see what actually happened." >&2
     STATE=$(cargo run -q -p admin-cli -- "$PROGRAM_ID" "tx:$SIGNER" "$RPC_URL" show) || {
-      echo "error: the transaction confirmed but the config could not be read back," >&2
-      echo "so the admin state is unknown. Check before relying on either wallet:" >&2
+      echo "error: the config could not be read back, so the admin state is unknown." >&2
+      echo "Check it before relying on either wallet:" >&2
       echo "  cargo run -p admin-cli -- $PROGRAM_ID tx:$SIGNER $RPC_URL show" >&2
       exit 1
     }
@@ -77,6 +79,15 @@ while true; do
       echo "Handover complete — $NEW_ADMIN is the config admin, confirmed on chain."
       echo "Leave UPGRADE_AUTHORITY in scripts/envs/$ENV.env alone; it is the loader's"
       echo "authority, which this did not move."
+    else
+      PENDING=$(awk '$1=="pending"&&$2=="admin"{print $4}' <<<"$STATE")
+      if [[ "$PENDING" != "$NEW_ADMIN" ]]; then
+        echo "error: the config shows pending admin ${PENDING:-<none>}, not $NEW_ADMIN." >&2
+        echo "The proposal did NOT land. Re-run this step." >&2
+        exit 1
+      fi
+      echo "Proposed — $NEW_ADMIN is pending, confirmed on chain. It must now run"
+      echo "'scripts/change-admin.sh $ENV accept $NEW_ADMIN' from its own wallet."
     fi
     exit 0
   fi
