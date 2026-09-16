@@ -22,6 +22,12 @@ pub const NATIVE_PULL_DATA_LEN: usize = 73;
 /// Little-endian u64 immediately after the discriminator.
 pub const NATIVE_PULL_AMOUNT_OFFSET: usize = 1;
 
+/// 32-byte delegator pubkey immediately after the amount.
+pub const NATIVE_PULL_DELEGATOR_OFFSET: usize = 9;
+
+/// 32-byte mint pubkey immediately after the delegator.
+pub const NATIVE_PULL_MINT_OFFSET: usize = 41;
+
 /// Minimum pull in token base units: 10_000 is $0.01 for six-decimal USDC.
 /// This is a fee-abuse policy, not a protocol limit. The mint is not pinned;
 /// reassess the floor before supporting other decimals.

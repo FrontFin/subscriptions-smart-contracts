@@ -186,6 +186,18 @@ pub mod subscription_controller {
             ControllerError::AmountBelowMinimum
         );
 
+        // The length check above also makes the delegator and mint slices safe.
+        let delegator = Pubkey::new_from_array(
+            native_data[NATIVE_PULL_DELEGATOR_OFFSET..NATIVE_PULL_DELEGATOR_OFFSET + 32]
+                .try_into()
+                .unwrap(),
+        );
+        let mint = Pubkey::new_from_array(
+            native_data[NATIVE_PULL_MINT_OFFSET..NATIVE_PULL_MINT_OFFSET + 32]
+                .try_into()
+                .unwrap(),
+        );
+
         let delegate_key = ctx.accounts.delegate.key();
         let metas: Vec<AccountMeta> = ctx
             .remaining_accounts
@@ -210,6 +222,27 @@ pub mod subscription_controller {
         let signer_seeds: &[&[u8]] = &[DELEGATE_SEED, &[ctx.bumps.delegate]];
 
         invoke_signed(&ix, &infos, &[signer_seeds])?;
+
+        // Emit a controller-level record so pulls are traceable without decoding
+        // the forwarded CPI. Best-effort telemetry via program logs, not authz.
+        emit!(PullExecuted {
+            puller_key: ctx.accounts.puller_key.key(),
+            delegate: delegate_key,
+            delegator,
+            mint,
+            amount,
+        });
+
         Ok(())
     }
+}
+
+/// Controller-level forensic record for a forwarded pull.
+#[event]
+pub struct PullExecuted {
+    pub puller_key: Pubkey,
+    pub delegate: Pubkey,
+    pub delegator: Pubkey,
+    pub mint: Pubkey,
+    pub amount: u64,
 }

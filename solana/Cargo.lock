@@ -5032,6 +5032,7 @@ name = "subscription-controller"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "base64 0.22.1",
  "bincode",
  "litesvm",
  "solana-account",

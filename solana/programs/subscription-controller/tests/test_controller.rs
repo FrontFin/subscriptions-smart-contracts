@@ -175,6 +175,43 @@ fn send(
     env.svm.send_transaction(tx).map(|_| ())
 }
 
+/// Like `send`, but keeps the success logs so tests can inspect emitted events.
+fn send_ok_logs(
+    env: &mut Env,
+    ix: Instruction,
+    fee_payer: &Keypair,
+    signers: &[&Keypair],
+) -> Vec<String> {
+    let blockhash = env.svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(&[ix], Some(&fee_payer.pubkey()), &blockhash);
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), signers).unwrap();
+    env.svm.send_transaction(tx).expect("transaction must succeed").logs
+}
+
+/// Decode the controller's `PullExecuted` event from a transaction's logs. Anchor
+/// `emit!` writes it as a `Program data:` line: base64(8-byte discriminator + Borsh).
+fn decode_pull_event(logs: &[String]) -> subscription_controller::PullExecuted {
+    use anchor_lang::{AnchorDeserialize, Discriminator};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    for line in logs {
+        let Some(payload) = line.strip_prefix("Program data: ") else {
+            continue;
+        };
+        let Ok(bytes) = STANDARD.decode(payload.trim()) else {
+            continue;
+        };
+        if bytes.len() < 8
+            || bytes[..8] != *subscription_controller::PullExecuted::DISCRIMINATOR
+        {
+            continue;
+        }
+        return subscription_controller::PullExecuted::try_from_slice(&bytes[8..])
+            .expect("PullExecuted payload must deserialize");
+    }
+    panic!("no PullExecuted event found in logs:\n{}", logs.join("\n"));
+}
+
 
 #[test]
 fn initialize_cannot_run_twice() {
@@ -923,7 +960,15 @@ fn pull_moves_funds_end_to_end_via_native_program() {
         &subscription_controller::instruction::Pull { native_data }.data(),
         metas,
     );
-    send(&mut env, ix.clone(), &puller, &[&puller]).expect("pull must succeed end-to-end");
+    let logs = send_ok_logs(&mut env, ix.clone(), &puller, &[&puller]);
+
+    // A successful pull must emit the controller-level forensic event.
+    let event = decode_pull_event(&logs);
+    assert_eq!(event.puller_key, puller.pubkey());
+    assert_eq!(event.delegate, env.delegate);
+    assert_eq!(event.delegator, delegator.pubkey());
+    assert_eq!(event.mint, mint);
+    assert_eq!(event.amount, AMOUNT_PER_PERIOD);
 
     let dest = env.svm.get_account(&dest_ata).unwrap();
     assert_eq!(native::token_amount(&dest.data), AMOUNT_PER_PERIOD);
